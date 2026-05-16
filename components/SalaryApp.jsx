@@ -313,48 +313,237 @@ function runCalculation({ settlements, priceMap, persons, personSettings, priceD
 // ============================================================
 // 导出工具
 // ============================================================
-function generatePersonMarkdown(p, month) {
-  const lines = [];
-  lines.push(`# ${p.name} · ${month} 薪酬核算报告`);
-  lines.push(`**生成时间**: ${new Date().toLocaleString("zh-CN")}`);
-  lines.push("");
-  lines.push("## 薪酬汇总");
-  lines.push("| 项目 | 金额（元） |");
-  lines.push("|---|---|");
-  lines.push(`| 基本工资 | ${fmtCNY(p.baseSalary)} |`);
-  lines.push(`| 绩效工资 | ${fmtCNY(p.perfWage)} |`);
-  lines.push(`| 销售提成 | ${fmtCNY(p.totalSaleCommission)} |`);
-  lines.push(`| 溢价奖金 | ${fmtCNY(p.totalPremium)} |`);
-  lines.push(`| 贸易提成 | ${fmtCNY(p.totalTrade)} |`);
-  lines.push(`| **合计** | **${fmtCNY(p.totalSalary)}** |`);
-  lines.push("");
-  lines.push("## 绩效工资推演");
-  lines.push(`(80% × min(${fmtPct(p.completionRate)}, 100%) + 20% × ${fmtNum(p.perfScore)}) × ${fmtCNY(p.perfBase)} = **${fmtCNY(p.perfWage)}**`);
-  lines.push("");
+// ============================================================
+// 个人报告 Excel 导出（HTML→XLS，单 Sheet，带完整样式）
+// 用 HTML Table 渲染，Excel 可直接打开，样式完整保留
+// ============================================================
+function exportPersonXlsx(p, month) {
+  // ── 通用样式常量 ───────────────────────────────────────────
+  const S = {
+    // 基础表格容器
+    wrap:   `font-family:Microsoft YaHei,Arial,sans-serif;font-size:10pt;`,
+    // 大标题
+    title:  `background:#1e293b;color:#ffffff;font-size:14pt;font-weight:bold;padding:10px 14px;text-align:left;`,
+    // 副标题（生成时间）
+    sub:    `background:#334155;color:#cbd5e1;font-size:9pt;padding:4px 14px;text-align:left;`,
+    // 区块标题（如"一、薪酬汇总"）
+    sec:    `background:#475569;color:#ffffff;font-size:10pt;font-weight:bold;padding:6px 10px;`,
+    // 普通表头
+    th:     `background:#0f172a;color:#ffffff;font-weight:bold;padding:6px 8px;text-align:center;border:1px solid #475569;white-space:nowrap;`,
+    // 蓝色表头（销售提成区）
+    thBlue: `background:#1d4ed8;color:#ffffff;font-weight:bold;padding:6px 8px;text-align:center;border:1px solid #1e40af;white-space:nowrap;`,
+    // 绿色表头（溢价奖金区）
+    thGreen:`background:#059669;color:#ffffff;font-weight:bold;padding:6px 8px;text-align:center;border:1px solid #065f46;white-space:nowrap;`,
+    // 琥珀色表头（贸易）
+    thAmber:`background:#d97706;color:#ffffff;font-weight:bold;padding:6px 8px;text-align:center;border:1px solid #92400e;white-space:nowrap;`,
+    // 普通单元格
+    td:     `padding:5px 8px;border:1px solid #e2e8f0;vertical-align:middle;`,
+    // 数字列（右对齐）
+    tdNum:  `padding:5px 8px;border:1px solid #e2e8f0;text-align:right;vertical-align:middle;`,
+    // 蓝色数据（销售提成）
+    tdBlue: `padding:5px 8px;border:1px solid #bfdbfe;text-align:right;background:#eff6ff;vertical-align:middle;`,
+    // 绿色数据（溢价奖金）
+    tdGreen:`padding:5px 8px;border:1px solid #a7f3d0;text-align:right;background:#ecfdf5;vertical-align:middle;`,
+    // 红色（负数溢价率）
+    tdRed:  `padding:5px 8px;border:1px solid #fca5a5;text-align:right;background:#fef2f2;color:#dc2626;font-weight:bold;vertical-align:middle;`,
+    // 合计行
+    totTd:  `padding:6px 8px;border:1px solid #94a3b8;background:#f1f5f9;font-weight:bold;vertical-align:middle;`,
+    totNum: `padding:6px 8px;border:1px solid #94a3b8;background:#f1f5f9;font-weight:bold;text-align:right;vertical-align:middle;`,
+    totBlue:`padding:6px 8px;border:1px solid #93c5fd;background:#dbeafe;font-weight:bold;text-align:right;vertical-align:middle;`,
+    totGreen:`padding:6px 8px;border:1px solid #6ee7b7;background:#d1fae5;font-weight:bold;text-align:right;vertical-align:middle;`,
+    // 奇偶行底色
+    even:   `background:#f8fafc;`,
+    odd:    `background:#ffffff;`,
+    // 标签格（汇总表左列）
+    label:  `padding:6px 10px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;`,
+    // 汇总值格
+    val:    `padding:6px 10px;border:1px solid #e2e8f0;text-align:right;`,
+    // 汇总合计行
+    sumRow: `padding:7px 10px;border:1px solid #94a3b8;background:#0f172a;color:#ffffff;font-weight:bold;`,
+    sumVal: `padding:7px 10px;border:1px solid #94a3b8;background:#0f172a;color:#ffffff;font-weight:bold;text-align:right;font-size:11pt;`,
+    // 空行分隔
+    gap:    `height:16px;`,
+    // 公式文本
+    formula:`padding:5px 12px;color:#374151;font-size:9.5pt;background:#fafafa;border:1px solid #e5e7eb;`,
+  };
 
+  const n2 = (v) => (v == null || isNaN(v) ? "" : Number(v).toFixed(2));
+  const n4 = (v) => (v == null || isNaN(v) ? "" : Number(v).toFixed(4));
+  const pct = (v, d=2) => (v == null || isNaN(v) ? "" : (Number(v)*100).toFixed(d)+"%");
+  const cny = (v) => (v == null || isNaN(v) ? "" : Number(v).toLocaleString("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2}));
+
+  // 计算合计
+  const sumKg   = p.myRegular.reduce((s,l)=>s+l._kg, 0);
+  const sumAmt  = p.myRegular.reduce((s,l)=>s+l.含税金额, 0);
+  const sumSale = p.myRegular.reduce((s,l)=>s+l._saleCommission, 0);
+  const sumPrem = p.myRegular.reduce((s,l)=>s+l._premiumCommission, 0);
+  const sumTrd  = p.myTrade.reduce((s,l)=>s+(l._tradeCommission||0), 0);
+
+  // ── 开始构建 HTML ──────────────────────────────────────────
+  let html = `<html xmlns:o="urn:schemas-microsoft-com:office:office"
+    xmlns:x="urn:schemas-microsoft-com:office:excel"
+    xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta charset="UTF-8">
+<xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>
+<x:Name>薪酬明细</x:Name>
+<x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions>
+</x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml>
+</head><body>
+<table style="${S.wrap}" cellspacing="0" cellpadding="0" border="0">`;
+
+  // ① 大标题
+  html += `<tr><td colspan="15" style="${S.title}">滨州康乃尔新材料科技有限公司 · 业务员薪酬核算明细</td></tr>`;
+  html += `<tr><td colspan="15" style="${S.sub}">${p.name} · ${month} &nbsp;|&nbsp; 生成时间：${new Date().toLocaleString("zh-CN")} &nbsp;|&nbsp; 本报告依据《2026年康乃尔经营薪酬考核方案V2.0》核算</td></tr>`;
+
+  // ② 空行
+  html += `<tr><td colspan="15" style="${S.gap}"></td></tr>`;
+
+  // ③ 一、薪酬汇总
+  html += `<tr><td colspan="15" style="${S.sec}">一、月度薪酬汇总</td></tr>`;
+  html += `<tr>
+    <td style="${S.th}" width="130">项目</td>
+    <td style="${S.th}" width="140">金额（元）</td>
+    <td colspan="13" style="border:none;"></td>
+  </tr>`;
+  const summaryRows = [
+    ["基本工资", p.baseSalary, ""],
+    ["绩效工资", p.perfWage, `（完成率 ${pct(p.completionRate)} · 绩效分 ${p.perfScore.toFixed(2)} · 基数 ${p.perfBase}`],
+    ["销售提成", p.totalSaleCommission, ""],
+    ["溢价奖金", p.totalPremium, ""],
+    ["贸易提成", p.totalTrade, ""],
+  ];
+  summaryRows.forEach(([label, val, note]) => {
+    html += `<tr>
+      <td style="${S.label}">${label}</td>
+      <td style="${S.val}">${cny(val)}</td>
+      <td colspan="13" style="padding:4px 10px;border:none;color:#64748b;font-size:9pt;">${note}</td>
+    </tr>`;
+  });
+  html += `<tr>
+    <td style="${S.sumRow}">合计薪酬</td>
+    <td style="${S.sumVal}">${cny(p.totalSalary)}</td>
+    <td colspan="13" style="border:none;"></td>
+  </tr>`;
+
+  // ④ 空行
+  html += `<tr><td colspan="15" style="${S.gap}"></td></tr>`;
+
+  // ⑤ 二、绩效工资推演
+  html += `<tr><td colspan="15" style="${S.sec}">二、绩效工资推演</td></tr>`;
+  html += `<tr><td colspan="15" style="${S.formula}">公式：绩效工资 = (80% × min(当月完成率, 100%) + 20% × 绩效分) × 绩效基数</td></tr>`;
+  html += `<tr><td colspan="15" style="${S.formula}">
+    = (80% × min(${pct(p.completionRate)}, 100%) + 20% × ${p.perfScore.toFixed(2)}) × ${p.perfBase.toFixed(0)}
+    = <strong>${cny(p.perfWage)}</strong> 元
+  </td></tr>`;
+
+  // ⑥ 空行
+  html += `<tr><td colspan="15" style="${S.gap}"></td></tr>`;
+
+  // ⑦ 三、常规订单明细
   if (p.myRegular.length > 0) {
-    lines.push("## 常规订单逐笔明细");
-    lines.push("| 订单号 | 类别 | 售达方 | 核定kg | 含税金额 | 运费/kg | 出厂价 | 基价 | 系数 | 活跃度 | 销售提成 | 居间 | 溢价率 | 溢价奖金 |");
-    lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
-    let sumSale = 0, sumPremium = 0, sumAmt = 0;
-    p.myRegular.forEach((l) => {
-      sumSale += l._saleCommission; sumPremium += l._premiumCommission; sumAmt += l.含税金额;
-      lines.push(`| ${l.销售订单} | ${l.类别}${l._isNegative ? "(负毛利)" : ""} | ${l.售达方描述} | ${fmtNum(l._kg, 1)} | ${fmtCNY(l.含税金额)} | ${fmtNum(l._freightUnit)} | ${fmtNum(l._exFactoryPrice)} | ${fmtNum(l._basePrice)} | ${fmtPct(l._commRate)} | ${l._activityCoef} | ${fmtCNY(l._saleCommission)} | ${l._priceDeduction || 0} | ${fmtPct(l._premiumRatio, 1)} | ${fmtCNY(l._premiumCommission)} |`);
+    html += `<tr><td colspan="15" style="${S.sec}">三、常规订单明细（共 ${p.myRegular.length} 笔）</td></tr>`;
+    html += `<tr>
+      <td style="${S.th}">订单号</td>
+      <td style="${S.th}">类别</td>
+      <td style="${S.th}">客户名称</td>
+      <td style="${S.th}">核定公斤</td>
+      <td style="${S.th}">含税金额</td>
+      <td style="${S.th}">运费单价<br>(元/kg)</td>
+      <td style="${S.th}">出厂售价<br>(元/kg)</td>
+      <td style="${S.th}">基价<br>(元/kg)</td>
+      <td style="${S.thBlue}">提成系数</td>
+      <td style="${S.thBlue}">活跃度</td>
+      <td style="${S.thBlue}">销售提成</td>
+      <td style="${S.th}">居间单价<br>(元/kg)</td>
+      <td style="${S.thGreen}">溢价率</td>
+      <td style="${S.thGreen}">溢价奖金</td>
+    </tr>`;
+    p.myRegular.forEach((l, idx) => {
+      const base = idx % 2 === 0 ? S.even : S.odd;
+      const premNeg = l._premiumRatio !== null && l._premiumRatio < 0;
+      html += `<tr style="${base}">
+        <td style="${S.td}font-size:9pt;">${l.销售订单}</td>
+        <td style="${S.td}">${l.类别}${l._isNegative ? '<br><span style="color:#d97706;font-size:8pt;">⚠负毛利</span>' : ""}</td>
+        <td style="${S.td}max-width:160px;">${l.售达方描述}</td>
+        <td style="${S.tdNum}">${n2(l._kg)}</td>
+        <td style="${S.tdNum}">${cny(l.含税金额)}</td>
+        <td style="${S.tdNum}">${n4(l._freightUnit)}</td>
+        <td style="${S.tdNum}">${n4(l._exFactoryPrice)}</td>
+        <td style="${S.tdNum}">${n4(l._basePrice)}</td>
+        <td style="${S.tdBlue}">${pct(l._commRate)}</td>
+        <td style="${S.tdBlue}">${l._activityCoef}</td>
+        <td style="${S.tdBlue}font-weight:bold;">${cny(l._saleCommission)}</td>
+        <td style="${S.tdNum}">${l._priceDeduction||0}</td>
+        <td style="${premNeg ? S.tdRed : S.tdGreen}">${l._premiumRatio!==null ? pct(l._premiumRatio,1) : "—"}</td>
+        <td style="${S.tdGreen}font-weight:bold;">${cny(l._premiumCommission)}</td>
+      </tr>`;
     });
-    lines.push(`| **合计** | | | | **${fmtCNY(sumAmt)}** | | | | | | **${fmtCNY(sumSale)}** | | | **${fmtCNY(sumPremium)}** |`);
-    lines.push("");
+    // 合计行
+    html += `<tr>
+      <td style="${S.totTd}" colspan="3">合计</td>
+      <td style="${S.totNum}">${n2(sumKg)}</td>
+      <td style="${S.totNum}">${cny(sumAmt)}</td>
+      <td colspan="3" style="border:none;"></td>
+      <td colspan="2" style="border:none;"></td>
+      <td style="${S.totBlue}">${cny(sumSale)}</td>
+      <td style="border:none;"></td>
+      <td style="border:none;"></td>
+      <td style="${S.totGreen}">${cny(sumPrem)}</td>
+    </tr>`;
   }
 
+  // ⑧ 贸易订单（如有）
   if (p.myTrade.length > 0) {
-    lines.push("## 贸易订单明细");
-    lines.push("| 订单号 | 物料 | 含税金额 | 品类 | 毛利 | 比例 | 提成 |");
-    lines.push("|---|---|---|---|---|---|---|");
-    let sumTrade = 0;
-    p.myTrade.forEach((l) => { sumTrade += l._tradeCommission || 0; lines.push(`| ${l.销售订单} | ${l.物料描述} | ${fmtCNY(l.含税金额)} | ${l._tradeCategory || "—"} | ${fmtCNY(l._tradeMargin)} | ${l._tradeRate ? fmtPct(l._tradeRate) : "—"} | ${fmtCNY(l._tradeCommission)} |`); });
-    lines.push(`| **合计** | | | | | | **${fmtCNY(sumTrade)}** |`);
-    lines.push("");
+    html += `<tr><td colspan="15" style="${S.gap}"></td></tr>`;
+    html += `<tr><td colspan="15" style="${S.sec}">四、贸易业务明细（共 ${p.myTrade.length} 笔）</td></tr>`;
+    html += `<tr>
+      <td style="${S.th}">订单号</td>
+      <td style="${S.th}" colspan="2">物料描述</td>
+      <td style="${S.th}" colspan="2">客户名称</td>
+      <td style="${S.th}">含税金额</td>
+      <td style="${S.thAmber}">贸易品类</td>
+      <td style="${S.thAmber}">毛利金额</td>
+      <td style="${S.thAmber}">提成比例</td>
+      <td style="${S.thAmber}">贸易提成</td>
+      <td colspan="4" style="border:none;"></td>
+    </tr>`;
+    p.myTrade.forEach((l, idx) => {
+      const base = idx % 2 === 0 ? S.even : S.odd;
+      html += `<tr style="${base}">
+        <td style="${S.td}font-size:9pt;">${l.销售订单}</td>
+        <td style="${S.td}" colspan="2">${l.物料描述}</td>
+        <td style="${S.td}" colspan="2">${l.售达方描述}</td>
+        <td style="${S.tdNum}">${cny(l.含税金额)}</td>
+        <td style="${S.td}">${l._tradeCategory||"—"}</td>
+        <td style="${S.tdNum}">${cny(l._tradeMargin)}</td>
+        <td style="${S.tdNum}">${l._tradeRate?pct(l._tradeRate,0):"—"}</td>
+        <td style="${S.tdNum}font-weight:bold;">${cny(l._tradeCommission)}</td>
+        <td colspan="4" style="border:none;"></td>
+      </tr>`;
+    });
+    html += `<tr>
+      <td style="${S.totTd}" colspan="9">贸易提成合计</td>
+      <td style="${S.totNum}font-weight:bold;">${cny(sumTrd)}</td>
+      <td colspan="4" style="border:none;"></td>
+    </tr>`;
   }
-  return lines.join("\n");
+
+  // ⑨ 底部说明
+  html += `<tr><td colspan="15" style="${S.gap}"></td></tr>`;
+  html += `<tr><td colspan="15" style="padding:6px 12px;color:#94a3b8;font-size:8.5pt;border-top:2px solid #e2e8f0;">
+    本报告由康乃尔薪酬核算系统自动生成。蓝色列为销售提成相关数据，绿色列为溢价奖金相关数据。如有疑问请联系销售管理部门。
+  </td></tr>`;
+
+  html += `</table></body></html>`;
+
+  // ── 下载为 .xls（Excel 直接支持 HTML Table 格式）──────────
+  const blob = new Blob(["\uFEFF" + html], { type: "application/vnd.ms-excel;charset=utf-8" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href     = url;
+  a.download = `康乃尔薪酬_${month}_${p.name}.xls`;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
 function generateAllMarkdown(personResults, warnings, month) {
@@ -616,14 +805,14 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
   const totals = personResults.reduce((a, p) => ({ base: a.base + p.baseSalary, perf: a.perf + p.perfWage, sale: a.sale + p.totalSaleCommission, premium: a.premium + p.totalPremium, trade: a.trade + p.totalTrade, total: a.total + p.totalSalary }), { base: 0, perf: 0, sale: 0, premium: 0, trade: 0, total: 0 });
   const month = data.settlementData.month || "";
 
-  // 导出下拉
+  // 导出下拉：个人 → Excel(.xlsx)，全员 → Markdown(.md)
   const [exportTarget, setExportTarget] = useState("all");
   const handleExport = useCallback(() => {
     if (exportTarget === "all") {
       downloadMd(generateAllMarkdown(personResults, warnings, month), `康乃尔薪酬核算_${month}_全员.md`);
     } else {
       const p = personResults.find((x) => x.name === exportTarget);
-      if (p) downloadMd(generatePersonMarkdown(p, month), `康乃尔薪酬_${month}_${p.name}.md`);
+      if (p) exportPersonXlsx(p, month);
     }
   }, [exportTarget, personResults, warnings, month]);
 
@@ -695,7 +884,7 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
                 <option value="all">全员汇总报告</option>
                 {personResults.map((p) => <option key={p.name} value={p.name}>{p.name} 个人报告</option>)}
               </select>
-              <button onClick={handleExport} className="px-4 py-2 bg-slate-900 text-white rounded-lg text-sm font-medium hover:bg-slate-800 inline-flex items-center gap-1.5"><Download size={14} /> 导出 Markdown</button>
+              <button onClick={handleExport} className="px-4 py-2 bg-slate-900 text-white rounded-lg text-sm font-medium hover:bg-slate-800 inline-flex items-center gap-1.5"><Download size={14} /> {exportTarget === "all" ? "导出 Markdown（全员）" : "导出 Excel（个人）"}</button>
             </div>
           </div>
         </div>)}
