@@ -21,10 +21,17 @@ import {
   Users,
   TrendingUp,
   Activity,
+  LogOut,
+  ShieldCheck,
+  UserPlus,
 } from "lucide-react";
+import {
+  calculatePerformanceWage,
+  parsePerformanceRows,
+} from "../lib/salaryRules.mjs";
 
 // ============================================================
-// 常量与系数表（依据《2026年康乃尔经营薪酬考核方案 V2.0》0515版）
+// 常量与系数表
 // ============================================================
 // 销售提成系数 — 按产品线（T列类别）
 const PRODUCT_LINE_RATES = {
@@ -43,9 +50,18 @@ const FUPAI_DEFAULT_RATE = 0.004;
 
 const TRADE_RATES = { 熔喷料: 0.4, 母粒: 0.3, 无纺布: 0.2 };
 
-const PERFORMANCE_BASE_BY_LEVEL = { 一级: 2000, 二级: 3000, 三级: 4000 };
-
-const PRICE_DEDUCTIONS_KEY = "kne_price_deductions_v1";
+const PRICE_DEDUCTIONS_KEY = "salary_price_deductions_v1";
+const AUTH_USERS_KEY = "salary_auth_users_v1";
+const AUTH_SESSION_KEY = "salary_auth_session_v1";
+const AUTH_SALT = "salary-admin-v1";
+const INITIAL_ADMIN_USERNAME = "18516826000";
+const INITIAL_ADMIN_PASSWORD_HASH = "b576cc184d1b21bb180ef3e79876a464d811bdefc339b84d389990494d3e40eb";
+const INITIAL_ADMIN_USER = {
+  username: INITIAL_ADMIN_USERNAME,
+  passwordHash: INITIAL_ADMIN_PASSWORD_HASH,
+  role: "管理员",
+  createdAt: "2026-07-03",
+};
 
 // ============================================================
 // 工具函数
@@ -63,6 +79,31 @@ const fmtPct = (n, d = 2) => {
   return (Number(n) * 100).toFixed(d) + "%";
 };
 const fmtWan = (n) => fmtNum((n || 0) / 10000, 4);
+
+async function hashPassword(password) {
+  const bytes = new TextEncoder().encode(`${AUTH_SALT}:${password}`);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function ensureInitialAdmin(users) {
+  const list = Array.isArray(users) ? users.filter((u) => u?.username && u?.passwordHash) : [];
+  if (list.some((u) => u.username === INITIAL_ADMIN_USERNAME)) return list;
+  return [INITIAL_ADMIN_USER, ...list];
+}
+
+function loadUsersFromStorage() {
+  try {
+    const raw = window.localStorage?.getItem(AUTH_USERS_KEY);
+    return ensureInitialAdmin(raw ? JSON.parse(raw) : []);
+  } catch {
+    return [INITIAL_ADMIN_USER];
+  }
+}
+
+function saveUsersToStorage(users) {
+  window.localStorage?.setItem(AUTH_USERS_KEY, JSON.stringify(ensureInitialAdmin(users)));
+}
 
 function extractWeightFromDesc(desc) {
   if (!desc || typeof desc !== "string") return null;
@@ -170,26 +211,7 @@ async function parsePerformanceWorkbook(file) {
   const sheetName = wb.SheetNames.find((n) => n.includes("汇总") || n.includes("绩效")) || wb.SheetNames[0];
   const ws = wb.Sheets[sheetName];
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "", raw: true });
-  if (rows.length < 3) throw new Error("绩效考核表数据不足");
-
-  const headerRow = rows[1] || [];
-  // 自动跳过"抵扣"列（如果存在）— 找到完成率列的位置
-  let colOffset = 1; // 默认 B 列起
-  if (headerRow.some((h) => String(h || "").includes("抵扣"))) colOffset = 2; // 抵扣在 B 列，完成率从 C 列起
-
-  const persons = [];
-  for (let i = 2; i < rows.length; i++) {
-    const row = rows[i];
-    if (!row[0] || String(row[0]).trim() === "") continue;
-    const name = String(row[0]).trim();
-    const completionRate = Number(row[colOffset]) || 0;
-    const perfScore = Number(row[colOffset + 1]) || 0;
-    const baseSalary = Number(row[colOffset + 2]) || 2000;
-    const level = String(row[colOffset + 3] || "一级").trim();
-    const perfBase = Number(row[colOffset + 4]) || PERFORMANCE_BASE_BY_LEVEL[level] || 2000;
-    persons.push({ name, defaultBaseSalary: baseSalary, defaultPerfBase: perfBase, completionRate, perfScore, level });
-  }
-  return { persons };
+  return { persons: parsePerformanceRows(rows) };
 }
 
 // ============================================================
@@ -274,7 +296,7 @@ function runCalculation({ settlements, priceMap, persons, personSettings, priceD
       lineBase._premiumRate = 0; lineBase._premiumCommission = 0;
     }
     lineBase._flag = "valid";
-    if (r.业务经理 && !personNames.has(r.业务经理)) warnings.push({ type: "人员未在绩效表", order: r.销售订单, person: r.业务经理, msg: `"${r.业务经理}" 不在绩效表中` });
+    if (r.业务经理 && !personNames.has(r.业务经理)) warnings.push({ type: "人员未在绩效分表", order: r.销售订单, person: r.业务经理, msg: `"${r.业务经理}" 不在绩效分表中` });
     validRegular.push(lineBase); allLines.push(lineBase);
   }
 
@@ -285,8 +307,7 @@ function runCalculation({ settlements, priceMap, persons, personSettings, priceD
     const settings = personSettings[p.name] || {};
     const baseSalary = settings.baseSalary !== undefined ? Number(settings.baseSalary) : p.defaultBaseSalary;
     const perfBase = settings.perfBase !== undefined ? Number(settings.perfBase) : p.defaultPerfBase;
-    const cappedRate = Math.min(p.completionRate, 1);
-    const perfWage = (0.8 * cappedRate + 0.2 * p.perfScore) * perfBase;
+    const perfWage = calculatePerformanceWage({ perfBase, perfScore: p.perfScore });
 
     const myRegular = validRegular.filter((l) => l.业务经理 === p.name);
     const myTrade = tradeLines.filter((l) => l.业务经理 === p.name);
@@ -304,7 +325,7 @@ function runCalculation({ settlements, priceMap, persons, personSettings, priceD
     const tradeReceipt = myTrade.reduce((s, l) => s + (Number(l.含税金额) || 0), 0);
     const droppedReceipt = myDropped.reduce((s, l) => s + (Number(l.含税金额) || 0), 0);
 
-    return { ...p, baseSalary, perfBase, perfWage, cappedRate, myRegular, myTrade, myDropped, totalSaleCommission, totalPremium, totalTrade, totalSalary, allReceipt, validReceipt, tradeReceipt, droppedReceipt };
+    return { ...p, baseSalary, perfBase, perfWage, myRegular, myTrade, myDropped, totalSaleCommission, totalPremium, totalTrade, totalSalary, allReceipt, validReceipt, tradeReceipt, droppedReceipt };
   });
 
   return { warnings, personResults, allLines, validRegular, tradeLines, dropped };
@@ -392,8 +413,8 @@ function exportPersonXlsx(p, month) {
 <table style="${S.wrap}" cellspacing="0" cellpadding="0" border="0">`;
 
   // ① 大标题
-  html += `<tr><td colspan="15" style="${S.title}">滨州康乃尔新材料科技有限公司 · 业务员薪酬核算明细</td></tr>`;
-  html += `<tr><td colspan="15" style="${S.sub}">${p.name} · ${month} &nbsp;|&nbsp; 生成时间：${new Date().toLocaleString("zh-CN")} &nbsp;|&nbsp; 本报告依据《2026年康乃尔经营薪酬考核方案V2.0》核算</td></tr>`;
+  html += `<tr><td colspan="15" style="${S.title}">业务员薪酬核算明细</td></tr>`;
+  html += `<tr><td colspan="15" style="${S.sub}">${p.name} · ${month} &nbsp;|&nbsp; 生成时间：${new Date().toLocaleString("zh-CN")}</td></tr>`;
 
   // ② 空行
   html += `<tr><td colspan="15" style="${S.gap}"></td></tr>`;
@@ -407,7 +428,7 @@ function exportPersonXlsx(p, month) {
   </tr>`;
   const summaryRows = [
     ["基本工资", p.baseSalary, ""],
-    ["绩效工资", p.perfWage, `（完成率 ${pct(p.completionRate)} · 绩效分 ${p.perfScore.toFixed(2)} · 基数 ${p.perfBase}`],
+    ["绩效工资", p.perfWage, `（当月绩效分 ${p.perfScore.toFixed(2)} · 绩效工资基数 ${p.perfBase}）`],
     ["销售提成", p.totalSaleCommission, ""],
     ["溢价奖金", p.totalPremium, ""],
     ["贸易提成", p.totalTrade, ""],
@@ -430,9 +451,9 @@ function exportPersonXlsx(p, month) {
 
   // ⑤ 二、绩效工资推演
   html += `<tr><td colspan="15" style="${S.sec}">二、绩效工资推演</td></tr>`;
-  html += `<tr><td colspan="15" style="${S.formula}">公式：绩效工资 = (80% × min(当月完成率, 100%) + 20% × 绩效分) × 绩效基数</td></tr>`;
+  html += `<tr><td colspan="15" style="${S.formula}">公式：绩效工资 = 绩效工资基数 × 当月绩效分</td></tr>`;
   html += `<tr><td colspan="15" style="${S.formula}">
-    = (80% × min(${pct(p.completionRate)}, 100%) + 20% × ${p.perfScore.toFixed(2)}) × ${p.perfBase.toFixed(0)}
+    = ${p.perfBase.toFixed(0)} × ${p.perfScore.toFixed(2)}
     = <strong>${cny(p.perfWage)}</strong> 元
   </td></tr>`;
 
@@ -531,7 +552,7 @@ function exportPersonXlsx(p, month) {
   // ⑨ 底部说明
   html += `<tr><td colspan="15" style="${S.gap}"></td></tr>`;
   html += `<tr><td colspan="15" style="padding:6px 12px;color:#94a3b8;font-size:8.5pt;border-top:2px solid #e2e8f0;">
-    本报告由康乃尔薪酬核算系统自动生成。蓝色列为销售提成相关数据，绿色列为溢价奖金相关数据。如有疑问请联系销售管理部门。
+    本报告由薪酬核算系统自动生成。蓝色列为销售提成相关数据，绿色列为溢价奖金相关数据。如有疑问请联系销售管理部门。
   </td></tr>`;
 
   html += `</table></body></html>`;
@@ -541,14 +562,14 @@ function exportPersonXlsx(p, month) {
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement("a");
   a.href     = url;
-  a.download = `康乃尔薪酬_${month}_${p.name}.xls`;
+  a.download = `薪酬明细_${month}_${p.name}.xls`;
   document.body.appendChild(a); a.click();
   document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
 function generateAllMarkdown(personResults, warnings, month) {
   const lines = [];
-  lines.push(`# 康乃尔业务人员月度薪酬核算报告`);
+  lines.push(`# 业务人员月度薪酬核算报告`);
   lines.push(`**核算月份**: ${month}  ·  **生成时间**: ${new Date().toLocaleString("zh-CN")}`);
   lines.push("");
   lines.push("## 薪酬汇总表");
@@ -636,10 +657,10 @@ function Step1Upload({ onComplete }) {
   );
   return (
     <div className="max-w-3xl mx-auto px-4">
-      <div className="text-center mb-8"><h2 className="text-2xl font-bold text-slate-900 mb-2">步骤一 · 上传数据文件</h2><p className="text-slate-500">请上传当月的回款明细表与绩效考核表</p></div>
+      <div className="text-center mb-8"><h2 className="text-2xl font-bold text-slate-900 mb-2">步骤一 · 上传数据文件</h2><p className="text-slate-500">请上传当月的回款明细表与绩效分表</p></div>
       <div className="space-y-4">
         <FileBox label="回款明细表" hint="包含「回款明细」和「基价表」Sheet" file={f1} onChange={setF1} />
-        <FileBox label="绩效考核表" hint="包含人员姓名、业绩完成率、绩效分等" file={f2} onChange={setF2} />
+        <FileBox label="绩效分表" hint="包含人员姓名、当月绩效分、基本工资和绩效工资基数" file={f2} onChange={setF2} />
       </div>
       {error && <div className="mt-5 p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl text-sm flex gap-2"><AlertTriangle size={18} className="shrink-0 mt-0.5" />{error}</div>}
       <button onClick={handleParse} disabled={parsing || !f1 || !f2} className="w-full mt-6 py-4 bg-slate-900 text-white rounded-xl font-semibold hover:bg-slate-800 disabled:bg-slate-300 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2">
@@ -705,9 +726,9 @@ function Step2Parameters({ data, onBack, onComplete }) {
         {activeTab === "salary" && (
           <div>
             <h3 className="font-semibold text-slate-900 mb-1">基本工资 与 绩效工资基数</h3>
-            <p className="text-sm text-slate-500 mb-4">默认值取自绩效表。绩效工资基数按等级：一级=2000、二级=3000、三级=4000。</p>
+            <p className="text-sm text-slate-500 mb-4">默认值取自上传的绩效分表，人员和工资项目以附件为准。</p>
             <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left bg-slate-50 border-y border-slate-200">
-              <th className="px-3 py-2.5 font-medium">人员</th><th className="px-3 py-2.5 font-medium">等级</th><th className="px-3 py-2.5 font-medium">基本工资</th><th className="px-3 py-2.5 font-medium">绩效基数</th><th className="px-3 py-2.5 font-medium">完成率</th><th className="px-3 py-2.5 font-medium">绩效分</th><th className="px-3 py-2.5 font-medium">操作</th>
+              <th className="px-3 py-2.5 font-medium">人员</th><th className="px-3 py-2.5 font-medium">等级</th><th className="px-3 py-2.5 font-medium">基本工资</th><th className="px-3 py-2.5 font-medium">绩效基数</th><th className="px-3 py-2.5 font-medium">当月绩效分</th><th className="px-3 py-2.5 font-medium">操作</th>
             </tr></thead><tbody>
               {persons.map((p) => (
                 <tr key={p.name} className="border-b border-slate-100 hover:bg-slate-50/50">
@@ -715,7 +736,6 @@ function Step2Parameters({ data, onBack, onComplete }) {
                   <td className="px-3 py-2.5 text-slate-600">{p.level}</td>
                   <td className="px-3 py-2.5"><input type="number" value={personSettings[p.name].baseSalary} onChange={(e) => updatePS(p.name, "baseSalary", e.target.value)} className="w-28 px-2 py-1 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-slate-400" /></td>
                   <td className="px-3 py-2.5"><input type="number" value={personSettings[p.name].perfBase} onChange={(e) => updatePS(p.name, "perfBase", e.target.value)} className="w-28 px-2 py-1 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-slate-400" /></td>
-                  <td className="px-3 py-2.5 text-slate-600">{fmtPct(p.completionRate)}</td>
                   <td className="px-3 py-2.5 text-slate-600">{fmtNum(p.perfScore)}</td>
                   <td className="px-3 py-2.5"><button onClick={() => restorePS(p.name)} className="text-slate-500 hover:text-slate-900 inline-flex items-center gap-1 text-xs"><RotateCcw size={12} /> 恢复</button></td>
                 </tr>))}
@@ -809,7 +829,7 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
   const [exportTarget, setExportTarget] = useState("all");
   const handleExport = useCallback(() => {
     if (exportTarget === "all") {
-      downloadMd(generateAllMarkdown(personResults, warnings, month), `康乃尔薪酬核算_${month}_全员.md`);
+      downloadMd(generateAllMarkdown(personResults, warnings, month), `薪酬核算_${month}_全员.md`);
     } else {
       const p = personResults.find((x) => x.name === exportTarget);
       if (p) exportPersonXlsx(p, month);
@@ -824,7 +844,7 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
     const csv = "\uFEFF" + rows.map((r) => r.map((c) => `"${c}"`).join(",")).join("\r\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = `康乃尔薪酬汇总_${month}.csv`;
+    const a = document.createElement("a"); a.href = url; a.download = `薪酬汇总_${month}.csv`;
     document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
   }, [personResults, totals, month]);
 
@@ -914,7 +934,7 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
                 <button onClick={() => setExpandedPerson(expanded ? null : p.name)} className="w-full px-5 py-4 flex items-center justify-between hover:bg-slate-50 text-left">
                   <div className="flex items-center gap-4">
                     <div className="w-10 h-10 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center font-semibold">{p.name.slice(0, 1)}</div>
-                    <div><div className="font-semibold text-slate-900">{p.name}</div><div className="text-xs text-slate-500">{p.level} · 完成率 {fmtPct(p.completionRate)} · 绩效分 {fmtNum(p.perfScore)} · 常规{p.myRegular.length}笔 · 贸易{p.myTrade.length}笔</div></div>
+                    <div><div className="font-semibold text-slate-900">{p.name}</div><div className="text-xs text-slate-500">{p.level} · 当月绩效分 {fmtNum(p.perfScore)} · 常规{p.myRegular.length}笔 · 贸易{p.myTrade.length}笔</div></div>
                   </div>
                   <div className="flex items-center gap-4">
                     <div className="text-right"><div className="text-xs text-slate-500">月度薪酬</div><div className="text-xl font-bold text-slate-900">¥ {fmtNum(p.totalSalary)}</div></div>
@@ -931,7 +951,7 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
                     {/* 绩效推演 */}
                     <div className="bg-white rounded-lg border border-slate-200 p-4">
                       <h4 className="text-sm font-semibold text-slate-900 mb-2">绩效工资推演</h4>
-                      <div className="text-sm text-slate-700 font-mono">(80% × min({fmtPct(p.completionRate)}, 100%) + 20% × {fmtNum(p.perfScore)}) × {fmtCNY(p.perfBase)} = <b>{fmtCNY(p.perfWage)}</b></div>
+                      <div className="text-sm text-slate-700 font-mono">{fmtCNY(p.perfBase)} × {fmtNum(p.perfScore)} = <b>{fmtCNY(p.perfWage)}</b></div>
                     </div>
                     {/* 常规订单逐笔 */}
                     {p.myRegular.length > 0 && (
@@ -1015,12 +1035,171 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
 // ============================================================
 // 主组件
 // ============================================================
-export default function App() {
+function LoginScreen({ onLogin }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setError("");
+    try {
+      const ok = await onLogin(username.trim(), password);
+      if (!ok) setError("账户名或密码不正确");
+    } catch {
+      setError("登录失败，请重试");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-100 flex items-center justify-center px-4">
+      <form onSubmit={handleSubmit} className="w-full max-w-sm bg-white border border-slate-200 rounded-2xl shadow-sm p-6">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-10 h-10 rounded-lg bg-slate-900 text-white flex items-center justify-center font-bold">薪</div>
+          <div>
+            <h1 className="font-bold text-slate-900">薪酬核算系统</h1>
+            <p className="text-xs text-slate-500">请登录后继续</p>
+          </div>
+        </div>
+        <div className="space-y-4">
+          <label className="block">
+            <span className="text-sm font-medium text-slate-700">账户名</span>
+            <input value={username} onChange={(e) => setUsername(e.target.value)} className="mt-1 w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-slate-400" autoComplete="username" />
+          </label>
+          <label className="block">
+            <span className="text-sm font-medium text-slate-700">密码</span>
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="mt-1 w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-slate-400" autoComplete="current-password" />
+          </label>
+        </div>
+        {error && <div className="mt-4 p-3 rounded-lg bg-red-50 text-red-700 text-sm border border-red-200">{error}</div>}
+        <button disabled={submitting || !username.trim() || !password} className="w-full mt-6 py-3 rounded-xl bg-slate-900 text-white font-semibold hover:bg-slate-800 disabled:bg-slate-300 disabled:cursor-not-allowed">
+          {submitting ? "登录中..." : "登录"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function AccountManager({ users, onUsersChange, onClose }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  const handleAdd = async (event) => {
+    event.preventDefault();
+    const nextUsername = username.trim();
+    if (!nextUsername || !password) { setError("请填写账户名和密码"); return; }
+    if (users.some((u) => u.username === nextUsername)) { setError("账户名已存在"); return; }
+    if (password.length < 6) { setError("密码至少 6 位"); return; }
+    const passwordHash = await hashPassword(password);
+    onUsersChange([...users, { username: nextUsername, passwordHash, role: "用户", createdAt: new Date().toISOString() }]);
+    setUsername("");
+    setPassword("");
+    setError("");
+  };
+
+  const handleDelete = (targetUsername) => {
+    if (targetUsername === INITIAL_ADMIN_USERNAME) return;
+    onUsersChange(users.filter((u) => u.username !== targetUsername));
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-900/40 flex items-center justify-center px-4">
+      <div className="w-full max-w-2xl bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+          <div className="flex items-center gap-2 font-semibold text-slate-900"><ShieldCheck size={18} /> 账户管理</div>
+          <button onClick={onClose} className="text-sm px-3 py-1.5 rounded-lg border border-slate-300 hover:bg-slate-50">关闭</button>
+        </div>
+        <div className="p-5 grid gap-5 md:grid-cols-[1fr_280px]">
+          <div>
+            <table className="w-full text-sm">
+              <thead><tr className="text-left border-b border-slate-200 bg-slate-50"><th className="px-3 py-2 font-medium">账户名</th><th className="px-3 py-2 font-medium">角色</th><th className="px-3 py-2 font-medium text-right">操作</th></tr></thead>
+              <tbody>
+                {users.map((u) => (
+                  <tr key={u.username} className="border-b border-slate-100">
+                    <td className="px-3 py-2 font-medium text-slate-900">{u.username}</td>
+                    <td className="px-3 py-2 text-slate-500">{u.role || "用户"}</td>
+                    <td className="px-3 py-2 text-right">
+                      <button disabled={u.username === INITIAL_ADMIN_USERNAME} onClick={() => handleDelete(u.username)} className="text-xs text-red-600 disabled:text-slate-300 disabled:cursor-not-allowed">删除</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <form onSubmit={handleAdd} className="bg-slate-50 border border-slate-200 rounded-xl p-4">
+            <div className="font-semibold text-sm text-slate-900 mb-3 flex items-center gap-2"><UserPlus size={16} /> 新增账户</div>
+            <label className="block mb-3">
+              <span className="text-xs text-slate-600">账户名</span>
+              <input value={username} onChange={(e) => setUsername(e.target.value)} className="mt-1 w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white" />
+            </label>
+            <label className="block mb-3">
+              <span className="text-xs text-slate-600">密码</span>
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="mt-1 w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white" />
+            </label>
+            {error && <div className="mb-3 text-xs text-red-700">{error}</div>}
+            <button className="w-full py-2 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800">添加</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AuthGate({ children }) {
+  const [ready, setReady] = useState(false);
+  const [users, setUsers] = useState([]);
+  const [currentUser, setCurrentUser] = useState(null);
+
+  useEffect(() => {
+    const storedUsers = loadUsersFromStorage();
+    saveUsersToStorage(storedUsers);
+    setUsers(storedUsers);
+    try {
+      const sessionUsername = window.localStorage?.getItem(AUTH_SESSION_KEY);
+      if (sessionUsername && storedUsers.some((u) => u.username === sessionUsername)) setCurrentUser(sessionUsername);
+    } catch {}
+    setReady(true);
+  }, []);
+
+  const handleUsersChange = (nextUsers) => {
+    const normalized = ensureInitialAdmin(nextUsers);
+    saveUsersToStorage(normalized);
+    setUsers(normalized);
+  };
+
+  const handleLogin = async (username, password) => {
+    const passwordHash = await hashPassword(password);
+    const matched = users.some((u) => u.username === username && u.passwordHash === passwordHash);
+    if (matched) {
+      window.localStorage?.setItem(AUTH_SESSION_KEY, username);
+      setCurrentUser(username);
+      return true;
+    }
+    return false;
+  };
+
+  const handleLogout = () => {
+    window.localStorage?.removeItem(AUTH_SESSION_KEY);
+    setCurrentUser(null);
+  };
+
+  if (!ready) return <div className="min-h-screen bg-slate-100 flex items-center justify-center text-sm text-slate-500">加载中...</div>;
+  if (!currentUser) return <LoginScreen onLogin={handleLogin} />;
+  return children({ currentUser, users, onUsersChange: handleUsersChange, onLogout: handleLogout });
+}
+
+function SalaryWorkflow({ currentUser, users, onUsersChange, onLogout }) {
   const [step, setStep] = useState(1);
   const [data, setData] = useState(null);
   const [params, setParams] = useState(null);
   const [result, setResult] = useState(null);
   const [calculating, setCalculating] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
 
   const handleStep1Done = (d) => { setData(d); setStep(2); };
   const handleStep2Done = (p) => {
@@ -1038,10 +1217,15 @@ export default function App() {
       <header className="bg-white border-b border-slate-200">
         <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-slate-800 to-slate-900 text-white flex items-center justify-center font-bold">KNE</div>
-            <div><div className="font-bold text-slate-900">康乃尔薪酬核算系统</div><div className="text-xs text-slate-500">v7.0 · 依据 2026年康乃尔经营薪酬考核方案 V2.0 (0515)</div></div>
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-slate-800 to-slate-900 text-white flex items-center justify-center font-bold">薪</div>
+            <div><div className="font-bold text-slate-900">薪酬核算系统</div><div className="text-xs text-slate-500">v7.1 · 月度薪酬自动核算</div></div>
           </div>
-          {data && <div className="hidden md:flex items-center gap-3 text-sm text-slate-600">
+          <div className="hidden md:flex items-center gap-3 text-sm text-slate-600">
+            <span className="px-2.5 py-1 bg-slate-100 rounded-md">当前账户：<b className="text-slate-900">{currentUser}</b></span>
+            <button onClick={() => setAccountOpen(true)} className="px-2.5 py-1 bg-white border border-slate-300 rounded-md hover:bg-slate-50 inline-flex items-center gap-1"><ShieldCheck size={14} /> 账户管理</button>
+            <button onClick={onLogout} className="px-2.5 py-1 bg-white border border-slate-300 rounded-md hover:bg-slate-50 inline-flex items-center gap-1"><LogOut size={14} /> 退出</button>
+          </div>
+          {data && <div className="hidden lg:flex items-center gap-3 text-sm text-slate-600">
             <span className="px-2.5 py-1 bg-slate-100 rounded-md">核算月份：<b className="text-slate-900">{data.settlementData.month}</b></span>
             <span className="px-2.5 py-1 bg-slate-100 rounded-md">业务员：<b className="text-slate-900">{data.perfData.persons.length}</b></span>
           </div>}
@@ -1053,6 +1237,17 @@ export default function App() {
       {!calculating && step === 2 && <Step2Parameters data={data} onBack={() => setStep(1)} onComplete={handleStep2Done} />}
       {!calculating && step === 4 && result && <ResultPanel result={result} params={params} data={data} onBack={() => setStep(2)} onRestart={handleRestart} />}
       <footer className="max-w-7xl mx-auto px-4 py-8 text-center text-xs text-slate-400">居间单价数据保存在本地浏览器，下次打开仍可使用。</footer>
+      {accountOpen && <AccountManager users={users} onUsersChange={onUsersChange} onClose={() => setAccountOpen(false)} />}
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthGate>
+      {({ currentUser, users, onUsersChange, onLogout }) => (
+        <SalaryWorkflow currentUser={currentUser} users={users} onUsersChange={onUsersChange} onLogout={onLogout} />
+      )}
+    </AuthGate>
   );
 }

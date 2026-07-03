@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "康乃尔薪酬核算系统 V2.0",
-  description: "康乃尔业务人员月度薪酬核算 — 基于 2026 年薪酬考核方案 V2.0",
+  title: "薪酬核算系统",
+  description: "业务人员月度薪酬自动核算工具",
 };
 
 export default function RootLayout({
