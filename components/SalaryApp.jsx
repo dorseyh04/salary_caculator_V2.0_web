@@ -27,27 +27,15 @@ import {
 } from "lucide-react";
 import {
   calculatePerformanceWage,
+  getSalesCommissionRate,
+  NEGATIVE_MARGIN_RATE,
   parsePerformanceRows,
+  parseSettlementRows,
 } from "../lib/salaryRules.mjs";
 
 // ============================================================
 // 常量与系数表
 // ============================================================
-// 销售提成系数 — 按产品线（T列类别）
-const PRODUCT_LINE_RATES = {
-  普通个体防护: 0.004,
-  高端个体防护: 0.006,
-  工业吸附: 0.006,
-  "液滤-电驻极": 0.006,
-  液滤: 0.006,
-  空滤: 0.006,
-  生活擦拭: 0.006,
-  耐高温材料: 0.008,
-  透气弹性材料: 0.01,
-};
-const NEGATIVE_MARGIN_RATE = 0.0025;
-const FUPAI_DEFAULT_RATE = 0.004;
-
 const TRADE_RATES = { 熔喷料: 0.4, 母粒: 0.3, 无纺布: 0.2 };
 
 const PRICE_DEDUCTIONS_KEY = "salary_price_deductions_v1";
@@ -123,15 +111,6 @@ function convertToKg(qty, unit, desc) {
   return { kg: q * w, source: `每${u}=${w}KG` };
 }
 
-function getProductLineRate(category) {
-  if (!category) return { rate: FUPAI_DEFAULT_RATE, warning: "T列为空，按0.4%处理" };
-  const c = String(category).trim();
-  if (c === "贸易") return { rate: 0, warning: "贸易订单不参与销售提成" };
-  if (c === "副牌") return { rate: FUPAI_DEFAULT_RATE, warning: "副牌按最低档0.4%" };
-  if (PRODUCT_LINE_RATES[c] !== undefined) return { rate: PRODUCT_LINE_RATES[c], warning: null };
-  return { rate: FUPAI_DEFAULT_RATE, warning: `未知类别"${c}"，暂按0.4%` };
-}
-
 function getPremiumRate(premiumRatio) {
   if (premiumRatio === null || premiumRatio === undefined || isNaN(premiumRatio)) return 0;
   if (premiumRatio <= 0) return 0;
@@ -163,29 +142,7 @@ async function parseSettlementWorkbook(file) {
   const ws1 = wb.Sheets[sheet1Name];
   const rows1 = XLSX.utils.sheet_to_json(ws1, { header: 1, defval: "", raw: true });
   if (rows1.length < 2) throw new Error("回款明细表为空或格式错误");
-  const dataRows1 = rows1.slice(1).filter((r) => r.some((c) => c !== "" && c !== null && c !== undefined));
-
-  const settlements = dataRows1.map((row, idx) => ({
-    _rowIdx: idx + 2,
-    年: row[0], 月: row[1],
-    销售订单: String(row[2] || "").trim(),
-    订单类型描述: row[3], 过账日期: row[4],
-    售达方: String(row[5] || "").trim(),
-    售达方描述: row[6], 销售合同号: row[7],
-    物料编码: String(row[8] || "").trim(),
-    物料描述: row[9], 单位: row[10], 数量: row[11],
-    含税单价: row[12],
-    含税金额: typeof row[13] === "number" ? row[13] : parseFloat(row[13]) || 0,
-    收款金额: typeof row[14] === "number" ? row[14] : parseFloat(row[14]) || 0,
-    交易日期: row[15], 差额: row[16],
-    备注: String(row[17] || ""),
-    回款月份: row[18],
-    类别: String(row[19] || "").trim(),
-    业务经理: String(row[20] || "").trim(),
-    基价_V列: row[21],
-    运费单价: typeof row[22] === "number" ? row[22] : parseFloat(row[22]) || 0,
-    提成活跃系数: row[23] === "" || row[23] === null || row[23] === undefined ? null : Number(row[23]),
-  }));
+  const settlements = parseSettlementRows(rows1);
 
   const sheet2Name = wb.SheetNames.find((n) => n.includes("基价")) || wb.SheetNames[1];
   const priceMap = new Map();
@@ -252,7 +209,7 @@ function runCalculation({ settlements, priceMap, persons, personSettings, priceD
     // ★ 核心变更：使用「含税金额」（N列）而非「收款金额」（O列）
     lineBase._exFactoryPrice = (Number(r.含税金额) - lineBase._freightTotal) / kg;
 
-    if (r.类别 === "贸易") {
+    if (r.分类 === "贸易") {
       const orderKey = `${r.销售订单}_${r.物料编码}`;
       const tradeInput = tradeMarginInputs[orderKey];
       lineBase._flag = "trade";
@@ -268,7 +225,7 @@ function runCalculation({ settlements, priceMap, persons, personSettings, priceD
     lineBase._isNegative = isNegative;
     let commRate, commRateSource;
     if (isNegative) { commRate = NEGATIVE_MARGIN_RATE; commRateSource = "负毛利(0.25%)"; }
-    else { const pl = getProductLineRate(r.类别); commRate = pl.rate; commRateSource = `${r.类别}`; if (pl.warning) warnings.push({ type: "类别异常", order: r.销售订单, person: r.业务经理, msg: `订单 ${r.销售订单}: ${pl.warning}` }); }
+    else { const pl = getSalesCommissionRate(r.分类); commRate = pl.rate; commRateSource = `${r.分类}`; if (pl.warning) warnings.push({ type: "分类异常", order: r.销售订单, person: r.业务经理, msg: `订单 ${r.销售订单}: ${pl.warning}` }); }
     lineBase._commRate = commRate; lineBase._commRateSource = commRateSource;
 
     const effectivePrice = Math.min(lineBase._exFactoryPrice, price);
@@ -465,7 +422,7 @@ function exportPersonXlsx(p, month) {
     html += `<tr><td colspan="15" style="${S.sec}">三、常规订单明细（共 ${p.myRegular.length} 笔）</td></tr>`;
     html += `<tr>
       <td style="${S.th}">订单号</td>
-      <td style="${S.th}">类别</td>
+      <td style="${S.th}">分类</td>
       <td style="${S.th}">客户名称</td>
       <td style="${S.th}">核定公斤</td>
       <td style="${S.th}">含税金额</td>
@@ -484,7 +441,7 @@ function exportPersonXlsx(p, month) {
       const premNeg = l._premiumRatio !== null && l._premiumRatio < 0;
       html += `<tr style="${base}">
         <td style="${S.td}font-size:9pt;">${l.销售订单}</td>
-        <td style="${S.td}">${l.类别}${l._isNegative ? '<br><span style="color:#d97706;font-size:8pt;">⚠负毛利</span>' : ""}</td>
+        <td style="${S.td}">${l.分类}${l._isNegative ? '<br><span style="color:#d97706;font-size:8pt;">⚠负毛利</span>' : ""}</td>
         <td style="${S.td}max-width:160px;">${l.售达方描述}</td>
         <td style="${S.tdNum}">${n2(l._kg)}</td>
         <td style="${S.tdNum}">${cny(l.含税金额)}</td>
@@ -691,12 +648,32 @@ function Step2Parameters({ data, onBack, onComplete }) {
   useEffect(() => { if (!storageReady) return; try { window.localStorage?.setItem(PRICE_DEDUCTIONS_KEY, JSON.stringify(priceDeductions)); } catch {} }, [priceDeductions, storageReady]);
 
   const [negativeOrders, setNegativeOrders] = useState([]);
-  const tradeOrdersRaw = useMemo(() => settlements.filter((s) => s.类别 === "贸易" && s.物料编码), [settlements]);
+  const tradeOrdersRaw = useMemo(() => settlements.filter((s) => s.分类 === "贸易" && s.物料编码), [settlements]);
   const [tradeMarginInputs, setTradeMarginInputs] = useState({});
   const customerActivityList = useMemo(() => {
     const map = new Map();
     for (const s of settlements) { if (!s.售达方 || !s.物料编码) continue; if (!map.has(s.售达方)) map.set(s.售达方, { customerId: s.售达方, name: s.售达方描述, defaultCoef: s.提成活跃系数 ?? 1, orderCount: 0 }); map.get(s.售达方).orderCount++; }
     return Array.from(map.values());
+  }, [settlements]);
+  const classificationRows = useMemo(() => {
+    const map = new Map();
+    for (const s of settlements) {
+      const classification = String(s.分类 || "").trim() || "未填写";
+      const info = getSalesCommissionRate(classification);
+      if (!map.has(classification)) {
+        map.set(classification, {
+          classification,
+          rate: info.rate,
+          warning: info.warning,
+          orderCount: 0,
+          receiptAmount: 0,
+        });
+      }
+      const item = map.get(classification);
+      item.orderCount += 1;
+      item.receiptAmount += Number(s.含税金额) || 0;
+    }
+    return Array.from(map.values()).sort((a, b) => a.classification.localeCompare(b.classification, "zh-CN"));
   }, [settlements]);
   const [activityOverrides, setActivityOverrides] = useState({});
 
@@ -705,6 +682,7 @@ function Step2Parameters({ data, onBack, onComplete }) {
 
   const tabs = [
     { id: "salary", label: "工资基数", icon: Coins, count: persons.length },
+    { id: "classification", label: "分类系数", icon: Receipt, count: classificationRows.length },
     { id: "interim", label: "居间单价", icon: Briefcase, count: priceDeductions.length },
     { id: "negative", label: "负毛利订单", icon: FileWarning, count: negativeOrders.length },
     { id: "trade", label: "贸易毛利", icon: TrendingUp, count: tradeOrdersRaw.length },
@@ -740,6 +718,30 @@ function Step2Parameters({ data, onBack, onComplete }) {
                   <td className="px-3 py-2.5"><button onClick={() => restorePS(p.name)} className="text-slate-500 hover:text-slate-900 inline-flex items-center gap-1 text-xs"><RotateCcw size={12} /> 恢复</button></td>
                 </tr>))}
             </tbody></table></div>
+          </div>)}
+
+        {activeTab === "classification" && (
+          <div>
+            <h3 className="font-semibold text-slate-900 mb-1">分类 与 销售提成系数</h3>
+            <p className="text-sm text-slate-500 mb-4">分类来自回款明细表“分类”列；销售提成系数按制度文件产品线分档执行。</p>
+            <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left bg-slate-50 border-y border-slate-200">
+              <th className="px-3 py-2.5 font-medium">分类</th>
+              <th className="px-3 py-2.5 font-medium text-right">订单数</th>
+              <th className="px-3 py-2.5 font-medium text-right">含税金额</th>
+              <th className="px-3 py-2.5 font-medium text-right">销售提成系数</th>
+              <th className="px-3 py-2.5 font-medium">说明</th>
+            </tr></thead><tbody>
+              {classificationRows.map((row) => (
+                <tr key={row.classification} className="border-b border-slate-100 hover:bg-slate-50/50">
+                  <td className="px-3 py-2.5 font-semibold text-slate-900">{row.classification}</td>
+                  <td className="px-3 py-2.5 text-right tabular-nums">{row.orderCount}</td>
+                  <td className="px-3 py-2.5 text-right tabular-nums">{fmtCNY(row.receiptAmount)}</td>
+                  <td className="px-3 py-2.5 text-right tabular-nums">{row.classification === "贸易" ? "不参与" : fmtPct(row.rate)}</td>
+                  <td className="px-3 py-2.5 text-slate-500">{row.warning || "制度系数"}</td>
+                </tr>
+              ))}
+            </tbody></table></div>
+            <p className="text-xs text-slate-500 mt-3">负毛利订单在后续核算中按 0.25% 覆盖分类系数。</p>
           </div>)}
 
         {activeTab === "interim" && (
@@ -958,7 +960,7 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
                       <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
                         <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 text-sm font-semibold">常规订单明细 ({p.myRegular.length} 笔)</div>
                         <div className="overflow-x-auto"><table className="w-full text-xs"><thead className="bg-slate-50/50"><tr className="text-left text-slate-600">
-                          <th className="px-2 py-2">订单号</th><th className="px-2 py-2">类别</th><th className="px-2 py-2">售达方</th><th className="px-2 py-2 text-right">核定kg</th><th className="px-2 py-2 text-right">含税金额</th><th className="px-2 py-2 text-right">运费/kg</th><th className="px-2 py-2 text-right">出厂价</th><th className="px-2 py-2 text-right">基价</th>
+                          <th className="px-2 py-2">订单号</th><th className="px-2 py-2">分类</th><th className="px-2 py-2">售达方</th><th className="px-2 py-2 text-right">核定kg</th><th className="px-2 py-2 text-right">含税金额</th><th className="px-2 py-2 text-right">运费/kg</th><th className="px-2 py-2 text-right">出厂价</th><th className="px-2 py-2 text-right">基价</th>
                           <th className={`px-2 py-2 text-right ${saleColor}`}>系数</th><th className="px-2 py-2 text-right">活跃度</th><th className={`px-2 py-2 text-right ${saleColor}`}>销售提成</th>
                           <th className="px-2 py-2 text-right">居间</th><th className={`px-2 py-2 text-right`}>溢价率</th><th className={`px-2 py-2 text-right ${premiumColor}`}>溢价奖金</th>
                         </tr></thead><tbody>
@@ -968,7 +970,7 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
                               return (
                               <tr key={l._rowIdx} className={`border-t border-slate-100 ${l._isNegative ? "bg-amber-50/40" : ""}`}>
                                 <td className="px-2 py-1.5 font-mono">{l.销售订单}</td>
-                                <td className="px-2 py-1.5">{l.类别}{l._isNegative && <span className="ml-1 text-amber-700">⚠</span>}</td>
+                                <td className="px-2 py-1.5">{l.分类}{l._isNegative && <span className="ml-1 text-amber-700">⚠</span>}</td>
                                 <td className="px-2 py-1.5 max-w-[120px] truncate" title={l.售达方描述}>{l.售达方描述}</td>
                                 <td className="px-2 py-1.5 text-right tabular-nums">{fmtNum(l._kg, 1)}</td>
                                 <td className="px-2 py-1.5 text-right tabular-nums">{fmtNum(l.含税金额)}</td>
