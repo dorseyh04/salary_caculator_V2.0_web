@@ -158,8 +158,18 @@ async function parseSettlementWorkbook(file) {
     }
   }
 
-  const monthGuess = settlements.find((s) => s.回款月份)?.回款月份 || settlements[0]?.月 || "";
-  return { settlements, priceMap, month: String(monthGuess), sheet1Name, sheet2Name };
+  // 月份提取：优先「月」字段（7/07），组合「年/回款月份」年份 → "2026年7月"
+  const firstRow = settlements[0] || {};
+  const yrMatch = String(firstRow.年 || "").match(/\d{4}/) || String(firstRow.回款月份 || "").match(/\d{4}/);
+  const yr = yrMatch ? yrMatch[0] : "";
+  let moNum = "";
+  const moVal = firstRow.月;
+  if (moVal !== "" && moVal != null) moNum = String(moVal).replace(/^0+/, "");
+  else { const m = String(firstRow.类别 || "").match(/(\d{1,2})\s*月/); if (m) moNum = m[1].replace(/^0+/, ""); }
+  const monthShort = moNum ? `${moNum}月` : "";
+  const monthFull = (yr ? `${yr}年` : "") + monthShort;
+  const month = monthFull || String(firstRow.回款月份 || "");
+  return { settlements, priceMap, month, monthShort, sheet1Name, sheet2Name };
 }
 
 async function parsePerformanceWorkbook(file) {
@@ -197,18 +207,7 @@ function runCalculation({ settlements, priceMap, persons, personSettings, priceD
     const remarkStr = String(r.备注 || "");
     if (remarkStr.includes("预收款") || remarkStr.includes("无合同")) { lineBase._flag = "dropped"; lineBase._dropReason = `备注含"${remarkStr.includes("预收款") ? "预收款" : "无合同"}"`; dropped.push(lineBase); allLines.push(lineBase); continue; }
 
-    const { kg, source: kgSource } = convertToKg(r.数量, r.单位, r.物料描述);
-    lineBase._kg = kg; lineBase._kgSource = kgSource;
-    if (kg === null || kg <= 0) { lineBase._flag = "dropped"; lineBase._dropReason = `单位折算失败：${kgSource}`; dropped.push(lineBase); allLines.push(lineBase); warnings.push({ type: "单位折算失败", order: r.销售订单, material: r.物料编码, person: r.业务经理, msg: `订单 ${r.销售订单} (物料 ${r.物料编码}) ${kgSource}` }); continue; }
-
-    const { price, source: priceSource } = resolveBasePrice(r.基价_V列, r.物料编码, priceMap);
-    lineBase._basePrice = price; lineBase._basePriceSource = priceSource;
-    if (price === null || price <= 0) { lineBase._flag = "dropped"; lineBase._dropReason = "基价缺失"; dropped.push(lineBase); allLines.push(lineBase); warnings.push({ type: "基价缺失", order: r.销售订单, material: r.物料编码, person: r.业务经理, msg: `订单 ${r.销售订单} 物料 ${r.物料编码} 基价无法获取` }); continue; }
-
-    lineBase._freightTotal = lineBase._freightUnit * kg;
-    // ★ 核心变更：使用「含税金额」（N列）而非「收款金额」（O列）
-    lineBase._exFactoryPrice = (Number(r.含税金额) - lineBase._freightTotal) / kg;
-
+    // ★ 贸易订单优先处理：不参与常规提成，不需要基价/kg，按「毛利 × 品类比例」计算
     if (r.分类 === "贸易") {
       const orderKey = `${r.销售订单}_${r.物料编码}`;
       const tradeInput = tradeMarginInputs[orderKey];
@@ -220,6 +219,18 @@ function runCalculation({ settlements, priceMap, persons, personSettings, priceD
       if (!tradeInput || !tradeInput.category) warnings.push({ type: "贸易订单未录入", order: r.销售订单, material: r.物料编码, person: r.业务经理, msg: `贸易订单 ${r.销售订单} 未录入毛利/品类，提成按0` });
       tradeLines.push(lineBase); allLines.push(lineBase); continue;
     }
+
+    const { kg, source: kgSource } = convertToKg(r.数量, r.单位, r.物料描述);
+    lineBase._kg = kg; lineBase._kgSource = kgSource;
+    if (kg === null || kg <= 0) { lineBase._flag = "dropped"; lineBase._dropReason = `单位折算失败：${kgSource}`; dropped.push(lineBase); allLines.push(lineBase); warnings.push({ type: "单位折算失败", order: r.销售订单, material: r.物料编码, person: r.业务经理, msg: `订单 ${r.销售订单} (物料 ${r.物料编码}) ${kgSource}` }); continue; }
+
+    const { price, source: priceSource } = resolveBasePrice(r.基价_V列, r.物料编码, priceMap);
+    lineBase._basePrice = price; lineBase._basePriceSource = priceSource;
+    if (price === null || price <= 0) { lineBase._flag = "dropped"; lineBase._dropReason = "基价缺失"; dropped.push(lineBase); allLines.push(lineBase); warnings.push({ type: "基价缺失", order: r.销售订单, material: r.物料编码, person: r.业务经理, msg: `订单 ${r.销售订单} 物料 ${r.物料编码} 基价无法获取` }); continue; }
+
+    lineBase._freightTotal = lineBase._freightUnit * kg;
+    // ★ 核心变更：使用「含税金额」（N列）而非「收款金额」（O列）
+    lineBase._exFactoryPrice = (Number(r.含税金额) - lineBase._freightTotal) / kg;
 
     const isNegative = negativeSet.has(String(r.销售订单).trim());
     lineBase._isNegative = isNegative;
@@ -519,9 +530,55 @@ function exportPersonXlsx(p, month) {
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement("a");
   a.href     = url;
-  a.download = `薪酬明细_${month}_${p.name}.xls`;
+  a.download = `${month}薪酬明细-${p.name}.xls`;
   document.body.appendChild(a); a.click();
   document.body.removeChild(a); URL.revokeObjectURL(url);
+}
+
+function generatePersonMarkdown(p, month) {
+  const lines = [];
+  lines.push(`## ${p.name} · ${month}`);
+  lines.push("");
+  lines.push("### 月度薪酬汇总");
+  lines.push("| 项目 | 金额（元） |");
+  lines.push("|---|---|");
+  lines.push(`| 基本工资 | ${fmtCNY(p.baseSalary)} |`);
+  lines.push(`| 绩效工资 | ${fmtCNY(p.perfWage)}（当月绩效分 ${p.perfScore.toFixed(2)} · 绩效工资基数 ${p.perfBase}） |`);
+  lines.push(`| 销售提成 | ${fmtCNY(p.totalSaleCommission)} |`);
+  lines.push(`| 溢价奖金 | ${fmtCNY(p.totalPremium)} |`);
+  lines.push(`| 贸易提成 | ${fmtCNY(p.totalTrade)} |`);
+  lines.push(`| **合计薪酬** | **${fmtCNY(p.totalSalary)}** |`);
+  lines.push("");
+  lines.push("### 常规订单明细");
+  if (p.myRegular.length === 0) {
+    lines.push("（无）");
+  } else {
+    lines.push("| 订单号 | 分类 | 客户名称 | 核定公斤 | 含税金额 | 出厂售价(元/kg) | 基价(元/kg) | 提成系数 | 活跃度 | 销售提成 | 溢价率 | 溢价奖金 |");
+    lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|");
+    p.myRegular.forEach((l) => {
+      const premRate = l._premiumRatio != null && !isNaN(l._premiumRatio) ? (l._premiumRatio * 100).toFixed(1) + "%" : "—";
+      lines.push(`| ${l.销售订单} | ${String(l.分类 || "").replace(/⚠负毛利$/, "")}${l._isNegative ? "⚠负毛利" : ""} | ${l.售达方描述 || ""} | ${Number(l._kg || 0).toFixed(2)} | ${fmtCNY(l.含税金额)} | ${l._exFactoryPrice != null ? Number(l._exFactoryPrice).toFixed(4) : "—"} | ${l._basePrice != null ? Number(l._basePrice).toFixed(4) : "—"} | ${l._commRate != null ? (l._commRate * 100).toFixed(2) + "%" : "—"} | ${l._activityCoef ?? "—"} | ${fmtCNY(l._saleCommission)} | ${premRate} | ${fmtCNY(l._premiumCommission)} |`);
+    });
+    const sumKg = p.myRegular.reduce((s, l) => s + l._kg, 0);
+    const sumAmt = p.myRegular.reduce((s, l) => s + Number(l.含税金额 || 0), 0);
+    const sumSale = p.myRegular.reduce((s, l) => s + l._saleCommission, 0);
+    const sumPrem = p.myRegular.reduce((s, l) => s + l._premiumCommission, 0);
+    lines.push(`| **合计** | | | **${Number(sumKg).toFixed(2)}** | **${fmtCNY(sumAmt)}** | | | | | **${fmtCNY(sumSale)}** | | **${fmtCNY(sumPrem)}** |`);
+  }
+  lines.push("");
+  if (p.myTrade.length > 0) {
+    lines.push("### 贸易业务明细");
+    lines.push("| 订单号 | 物料 | 含税金额 | 品类 | 毛利（元） | 比例 | 贸易提成 |");
+    lines.push("|---|---|---|---|---|---|---|");
+    let sumT = 0;
+    p.myTrade.forEach((l) => {
+      sumT += l._tradeCommission || 0;
+      lines.push(`| ${l.销售订单} | ${l.物料描述 || ""} | ${fmtCNY(l.含税金额)} | ${l._tradeCategory || "—"} | ${fmtCNY(l._tradeMargin)} | ${l._tradeRate ? (l._tradeRate * 100).toFixed(0) + "%" : "—"} | ${fmtCNY(l._tradeCommission)} |`);
+    });
+    lines.push(`| **合计** | | | | | | **${fmtCNY(sumT)}** |`);
+    lines.push("");
+  }
+  return lines.join("\n");
 }
 
 function generateAllMarkdown(personResults, warnings, month) {
@@ -781,13 +838,14 @@ function Step2Parameters({ data, onBack, onComplete }) {
             <p className="text-sm text-slate-500 mb-4">提成比例：熔喷料 40% / 母粒 30% / 无纺布 20%。</p>
             {tradeOrdersRaw.length === 0 ? <div className="text-center py-10 text-slate-400 text-sm bg-slate-50/50 rounded-lg border border-dashed border-slate-200">本月无贸易订单</div> : (
               <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left bg-slate-50 border-y border-slate-200">
-                <th className="px-3 py-2.5 font-medium">订单号</th><th className="px-3 py-2.5 font-medium">业务员</th><th className="px-3 py-2.5 font-medium">物料</th><th className="px-3 py-2.5 font-medium">含税金额</th><th className="px-3 py-2.5 font-medium">品类</th><th className="px-3 py-2.5 font-medium">毛利（元）</th>
+                <th className="px-3 py-2.5 font-medium">订单号</th><th className="px-3 py-2.5 font-medium">业务员</th><th className="px-3 py-2.5 font-medium">物料</th><th className="px-3 py-2.5 font-medium">含税金额</th><th className="px-3 py-2.5 font-medium">品类</th><th className="px-3 py-2.5 font-medium">毛利（元）</th><th className="px-3 py-2.5 font-medium">预计提成</th>
               </tr></thead><tbody>
-                {tradeOrdersRaw.map((o) => { const key = `${o.销售订单}_${o.物料编码}`; const cur = tradeMarginInputs[key] || {}; return (
+                {tradeOrdersRaw.map((o) => { const key = `${o.销售订单}_${o.物料编码}`; const cur = tradeMarginInputs[key] || {}; const marginNum = parseFloat(cur.margin); const rateNum = cur.category ? (TRADE_RATES[cur.category] || 0) : 0; const estTrade = !isNaN(marginNum) && rateNum > 0 ? marginNum * rateNum : null; return (
                   <tr key={key} className="border-b border-slate-100 hover:bg-slate-50/50">
                     <td className="px-3 py-2.5 font-mono text-xs">{o.销售订单}</td><td className="px-3 py-2.5">{o.业务经理}</td><td className="px-3 py-2.5 text-xs max-w-xs truncate">{o.物料描述}</td><td className="px-3 py-2.5">{fmtCNY(o.含税金额)}</td>
                     <td className="px-3 py-2.5"><select value={cur.category || ""} onChange={(e) => setTradeMarginInputs((p) => ({ ...p, [key]: { ...p[key], category: e.target.value } }))} className="px-2 py-1 border border-slate-300 rounded-md text-sm bg-white"><option value="">-选择-</option><option value="熔喷料">熔喷料(40%)</option><option value="母粒">母粒(30%)</option><option value="无纺布">无纺布(20%)</option></select></td>
                     <td className="px-3 py-2.5"><input type="number" step="0.01" value={cur.margin || ""} onChange={(e) => setTradeMarginInputs((p) => ({ ...p, [key]: { ...p[key], margin: e.target.value } }))} className="w-32 px-2 py-1 border border-slate-300 rounded-md text-sm" /></td>
+                    <td className="px-3 py-2.5">{estTrade !== null ? <span className="inline-flex items-center gap-1 text-sm font-semibold text-amber-700">{fmtCNY(estTrade)}<span className="text-xs font-normal text-slate-400">({cur.category ? TRADE_RATES[cur.category] * 100 : 0}%)</span></span> : <span className="text-xs text-slate-300">—</span>}</td>
                   </tr>); })}
               </tbody></table></div>)}
           </div>)}
