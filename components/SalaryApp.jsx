@@ -6,8 +6,6 @@ import {
   Settings,
   Calculator,
   FileBarChart,
-  Plus,
-  Trash2,
   RotateCcw,
   AlertTriangle,
   CheckCircle2,
@@ -38,7 +36,6 @@ import {
 // ============================================================
 const TRADE_RATES = { 熔喷料: 0.4, 母粒: 0.3, 无纺布: 0.2 };
 
-const PRICE_DEDUCTIONS_KEY = "salary_price_deductions_v1";
 const AUTH_USERS_KEY = "salary_auth_users_v1";
 const AUTH_SESSION_KEY = "salary_auth_session_v1";
 const AUTH_SALT = "salary-admin-v1";
@@ -182,13 +179,11 @@ async function parsePerformanceWorkbook(file) {
 }
 
 // ============================================================
-// 计算引擎（无抵扣，使用含税金额）
+// 计算引擎（无抵扣，使用含税金额；负毛利/居间费逐行读取自回款明细 Z/AA 列）
 // ============================================================
-function runCalculation({ settlements, priceMap, persons, personSettings, priceDeductions, negativeOrders, tradeMarginInputs, activityOverrides }) {
+function runCalculation({ settlements, priceMap, persons, personSettings, tradeMarginInputs, activityOverrides }) {
   const warnings = [];
   const allLines = [], validRegular = [], tradeLines = [], dropped = [];
-  const negativeSet = new Set(negativeOrders.map((o) => String(o).trim()).filter(Boolean));
-  const priceDedMap = new Map(priceDeductions.map((d) => [String(d.customerId).trim(), Number(d.pricePerKg) || 0]));
   const activityMap = new Map(Object.entries(activityOverrides));
   const personNames = new Set(persons.map((p) => p.name));
 
@@ -232,7 +227,7 @@ function runCalculation({ settlements, priceMap, persons, personSettings, priceD
     // ★ 核心变更：使用「含税金额」（N列）而非「收款金额」（O列）
     lineBase._exFactoryPrice = (Number(r.含税金额) - lineBase._freightTotal) / kg;
 
-    const isNegative = negativeSet.has(String(r.销售订单).trim());
+    const isNegative = String(r.负毛利标记 || "").includes("负毛利");
     lineBase._isNegative = isNegative;
     let commRate, commRateSource;
     if (isNegative) { commRate = NEGATIVE_MARGIN_RATE; commRateSource = "负毛利(0.25%)"; }
@@ -250,7 +245,8 @@ function runCalculation({ settlements, priceMap, persons, personSettings, priceD
     lineBase._activityCoef = activityCoef;
     lineBase._saleCommission = lineBase._commBase * commRate * activityCoef;
 
-    const priceDed = priceDedMap.get(r.售达方) || 0;
+    // 居间费逐行读取自回款明细 AA 列：>0 才参与溢价修正，否则按 0
+    const priceDed = Number(r.居间费) > 0 ? Number(r.居间费) : 0;
     lineBase._priceDeduction = priceDed;
     lineBase._adjPrice = lineBase._exFactoryPrice - priceDed;
     if (lineBase._adjPrice > price) {
@@ -267,9 +263,6 @@ function runCalculation({ settlements, priceMap, persons, personSettings, priceD
     if (r.业务经理 && !personNames.has(r.业务经理)) warnings.push({ type: "人员未在绩效分表", order: r.销售订单, person: r.业务经理, msg: `"${r.业务经理}" 不在绩效分表中` });
     validRegular.push(lineBase); allLines.push(lineBase);
   }
-
-  for (const d of priceDeductions) { const cid = String(d.customerId).trim(); if (cid && !settlements.some((s) => s.售达方 === cid)) warnings.push({ type: "居间单价无匹配", msg: `售达方 ${cid} 无匹配订单` }); }
-  for (const o of negativeOrders) { const oid = String(o).trim(); if (oid && !settlements.some((s) => String(s.销售订单).trim() === oid)) warnings.push({ type: "负毛利无匹配", msg: `订单 ${oid} 无匹配` }); }
 
   const personResults = persons.map((p) => {
     const settings = personSettings[p.name] || {};
@@ -443,7 +436,7 @@ function exportPersonXlsx(p, month) {
       <td style="${S.thBlue}">提成系数</td>
       <td style="${S.thBlue}">活跃度</td>
       <td style="${S.thBlue}">销售提成</td>
-      <td style="${S.th}">居间单价<br>(元/kg)</td>
+      <td style="${S.th}">居间费<br>(元/kg)</td>
       <td style="${S.thGreen}">溢价率</td>
       <td style="${S.thGreen}">溢价奖金</td>
     </tr>`;
@@ -685,7 +678,7 @@ function Step1Upload({ onComplete }) {
 }
 
 // ============================================================
-// 步骤 2：参数确认（5 个 Tab，无抵扣）
+// 步骤 2：参数确认（6 个 Tab：4 个可编辑 + 居间费/负毛利自动读取只读展示）
 // ============================================================
 function Step2Parameters({ data, onBack, onComplete }) {
   const { settlementData, perfData } = data;
@@ -699,12 +692,9 @@ function Step2Parameters({ data, onBack, onComplete }) {
     return init;
   });
 
-  const [priceDeductions, setPriceDeductions] = useState([]);
-  const [storageReady, setStorageReady] = useState(false);
-  useEffect(() => { try { const raw = window.localStorage?.getItem(PRICE_DEDUCTIONS_KEY); if (raw) { const p = JSON.parse(raw); if (Array.isArray(p)) setPriceDeductions(p); } } catch {} finally { setStorageReady(true); } }, []);
-  useEffect(() => { if (!storageReady) return; try { window.localStorage?.setItem(PRICE_DEDUCTIONS_KEY, JSON.stringify(priceDeductions)); } catch {} }, [priceDeductions, storageReady]);
-
-  const [negativeOrders, setNegativeOrders] = useState([]);
+  // 居间费（AA 列）与负毛利（Z 列）从回款明细逐行自动读取，无需手工录入
+  const interimRows = useMemo(() => settlements.filter((s) => Number(s.居间费) > 0), [settlements]);
+  const negativeRows = useMemo(() => settlements.filter((s) => String(s.负毛利标记 || "").includes("负毛利")), [settlements]);
   const tradeOrdersRaw = useMemo(() => settlements.filter((s) => s.分类 === "贸易" && s.物料编码), [settlements]);
   const [tradeMarginInputs, setTradeMarginInputs] = useState({});
   const customerActivityList = useMemo(() => {
@@ -740,17 +730,17 @@ function Step2Parameters({ data, onBack, onComplete }) {
   const tabs = [
     { id: "salary", label: "工资基数", icon: Coins, count: persons.length },
     { id: "classification", label: "分类系数", icon: Receipt, count: classificationRows.length },
-    { id: "interim", label: "居间单价", icon: Briefcase, count: priceDeductions.length },
-    { id: "negative", label: "负毛利订单", icon: FileWarning, count: negativeOrders.length },
+    { id: "interim", label: "居间费", icon: Briefcase, count: interimRows.length },
+    { id: "negative", label: "负毛利订单", icon: FileWarning, count: negativeRows.length },
     { id: "trade", label: "贸易毛利", icon: TrendingUp, count: tradeOrdersRaw.length },
     { id: "activity", label: "活跃度系数", icon: Activity, count: customerActivityList.length },
   ];
 
-  const handleSubmit = () => onComplete({ personSettings, priceDeductions: priceDeductions.filter((d) => d.customerId?.trim()), negativeOrders: negativeOrders.filter((o) => String(o).trim()), tradeMarginInputs, activityOverrides });
+  const handleSubmit = () => onComplete({ personSettings, tradeMarginInputs, activityOverrides });
 
   return (
     <div className="max-w-7xl mx-auto px-4 pb-12">
-      <div className="text-center mb-6"><h2 className="text-2xl font-bold text-slate-900 mb-1">步骤二 · 确认 / 修改参数</h2><p className="text-slate-500 text-sm">默认值已从文件读取，可逐项调整。居间单价跨会话自动保留。</p></div>
+      <div className="text-center mb-6"><h2 className="text-2xl font-bold text-slate-900 mb-1">步骤二 · 确认 / 修改参数</h2><p className="text-slate-500 text-sm">默认值已从文件读取，可逐项调整。居间费与负毛利订单由回款明细自动带出，无需录入。</p></div>
       <div className="flex flex-wrap gap-2 border-b border-slate-200 mb-6">
         {tabs.map((t) => { const Icon = t.icon; const active = activeTab === t.id; return (
           <button key={t.id} onClick={() => setActiveTab(t.id)} className={`px-4 py-2.5 -mb-px border-b-2 font-medium text-sm flex items-center gap-2 transition-colors ${active ? "border-slate-900 text-slate-900" : "border-transparent text-slate-500 hover:text-slate-700"}`}>
@@ -803,33 +793,35 @@ function Step2Parameters({ data, onBack, onComplete }) {
 
         {activeTab === "interim" && (
           <div>
-            <div className="flex items-start justify-between mb-1"><h3 className="font-semibold text-slate-900">溢价奖金扣除项目（居间单价）</h3><span className="text-xs text-emerald-600 bg-emerald-50 px-2 py-1 rounded-md">✓ 自动持久化</span></div>
-            <p className="text-sm text-slate-500 mb-4">针对特定客户从出厂售价中扣除的费用单价（元/kg），仅影响溢价奖金。</p>
-            <div className="space-y-2 mb-3">
-              {priceDeductions.length === 0 && <div className="text-center py-8 text-slate-400 text-sm bg-slate-50/50 rounded-lg border border-dashed border-slate-200">尚未录入</div>}
-              {priceDeductions.map((d, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <input placeholder="售达方编号" value={d.customerId} onChange={(e) => { const arr = [...priceDeductions]; arr[i] = { ...arr[i], customerId: e.target.value }; setPriceDeductions(arr); }} className="flex-1 px-3 py-2 border border-slate-300 rounded-md text-sm" />
-                  <input type="number" step="0.01" placeholder="元/kg" value={d.pricePerKg} onChange={(e) => { const arr = [...priceDeductions]; arr[i] = { ...arr[i], pricePerKg: e.target.value }; setPriceDeductions(arr); }} className="w-44 px-3 py-2 border border-slate-300 rounded-md text-sm" />
-                  <button onClick={() => setPriceDeductions((p) => p.filter((_, idx) => idx !== i))} className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md"><Trash2 size={16} /></button>
-                </div>))}
-            </div>
-            <button onClick={() => setPriceDeductions((p) => [...p, { customerId: "", pricePerKg: "" }])} className="text-sm px-3 py-2 border border-dashed border-slate-400 rounded-md hover:bg-slate-50 inline-flex items-center gap-1.5 text-slate-700"><Plus size={14} /> 添加</button>
+            <div className="flex items-start justify-between mb-1"><h3 className="font-semibold text-slate-900">居间费（溢价奖金扣除项）</h3><span className="text-xs text-blue-600 bg-blue-50 px-2 py-1 rounded-md">✓ 从回款明细自动读取</span></div>
+            <p className="text-sm text-slate-500 mb-4">逐行读取回款明细「居间费」列（元/kg），仅影响溢价奖金。为 0 或空白的行不参与；如需调整，请修改 Excel 后重新上传。</p>
+            {interimRows.length === 0 ? <div className="text-center py-8 text-slate-400 text-sm bg-slate-50/50 rounded-lg border border-dashed border-slate-200">本月回款明细中居间费均为 0 或未填写，无扣除</div> : (
+              <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left bg-slate-50 border-y border-slate-200">
+                <th className="px-3 py-2.5 font-medium">订单号</th><th className="px-3 py-2.5 font-medium">业务员</th><th className="px-3 py-2.5 font-medium">售达方</th><th className="px-3 py-2.5 font-medium">客户名称</th><th className="px-3 py-2.5 font-medium">物料描述</th><th className="px-3 py-2.5 font-medium text-right">居间费（元/kg）</th>
+              </tr></thead><tbody>
+                {interimRows.map((s) => (
+                  <tr key={s._rowIdx} className="border-b border-slate-100 hover:bg-slate-50/50">
+                    <td className="px-3 py-2.5 font-mono text-xs">{s.销售订单}</td><td className="px-3 py-2.5">{s.业务经理}</td><td className="px-3 py-2.5 font-mono text-xs">{s.售达方}</td><td className="px-3 py-2.5 max-w-xs truncate">{s.售达方描述}</td><td className="px-3 py-2.5 text-xs max-w-xs truncate">{s.物料描述}</td>
+                    <td className="px-3 py-2.5 text-right tabular-nums font-semibold text-blue-700">{fmtNum(s.居间费)}</td>
+                  </tr>))}
+              </tbody></table></div>)}
           </div>)}
 
         {activeTab === "negative" && (
           <div>
-            <h3 className="font-semibold text-slate-900 mb-1">负毛利订单</h3>
-            <p className="text-sm text-slate-500 mb-4">被标记的订单统一按 <b>0.25%</b> 计算销售提成系数。</p>
-            <div className="space-y-2 mb-3">
-              {negativeOrders.length === 0 && <div className="text-center py-8 text-slate-400 text-sm bg-slate-50/50 rounded-lg border border-dashed border-slate-200">尚未标记</div>}
-              {negativeOrders.map((o, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <input placeholder="订单编号" value={o} onChange={(e) => { const arr = [...negativeOrders]; arr[i] = e.target.value; setNegativeOrders(arr); }} className="flex-1 px-3 py-2 border border-slate-300 rounded-md text-sm" />
-                  <button onClick={() => setNegativeOrders((n) => n.filter((_, idx) => idx !== i))} className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md"><Trash2 size={16} /></button>
-                </div>))}
-            </div>
-            <button onClick={() => setNegativeOrders((n) => [...n, ""])} className="text-sm px-3 py-2 border border-dashed border-slate-400 rounded-md hover:bg-slate-50 inline-flex items-center gap-1.5 text-slate-700"><Plus size={14} /> 添加</button>
+            <div className="flex items-start justify-between mb-1"><h3 className="font-semibold text-slate-900">负毛利订单</h3><span className="text-xs text-blue-600 bg-blue-50 px-2 py-1 rounded-md">✓ 从回款明细自动读取</span></div>
+            <p className="text-sm text-slate-500 mb-4">回款明细「负毛利」列带标记的行，销售提成系数统一按 <b>0.25%</b> 计算（覆盖产品线系数）。如需调整，请修改 Excel 后重新上传。</p>
+            {negativeRows.length === 0 ? <div className="text-center py-8 text-slate-400 text-sm bg-slate-50/50 rounded-lg border border-dashed border-slate-200">本月无负毛利订单</div> : (
+              <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left bg-slate-50 border-y border-slate-200">
+                <th className="px-3 py-2.5 font-medium">订单号</th><th className="px-3 py-2.5 font-medium">业务员</th><th className="px-3 py-2.5 font-medium">客户名称</th><th className="px-3 py-2.5 font-medium">分类</th><th className="px-3 py-2.5 font-medium text-right">含税金额</th><th className="px-3 py-2.5 font-medium text-right">提成系数</th>
+              </tr></thead><tbody>
+                {negativeRows.map((s) => (
+                  <tr key={s._rowIdx} className="border-b border-slate-100 hover:bg-slate-50/50">
+                    <td className="px-3 py-2.5 font-mono text-xs">{s.销售订单}</td><td className="px-3 py-2.5">{s.业务经理}</td><td className="px-3 py-2.5 max-w-xs truncate">{s.售达方描述}</td><td className="px-3 py-2.5">{s.分类}</td>
+                    <td className="px-3 py-2.5 text-right tabular-nums">{fmtCNY(s.含税金额)}</td>
+                    <td className="px-3 py-2.5 text-right tabular-nums font-semibold text-amber-700">0.25%</td>
+                  </tr>))}
+              </tbody></table></div>)}
           </div>)}
 
         {activeTab === "trade" && (
@@ -1278,7 +1270,7 @@ function SalaryWorkflow({ currentUser, users, onUsersChange, onLogout }) {
         <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-slate-800 to-slate-900 text-white flex items-center justify-center font-bold">薪</div>
-            <div><div className="font-bold text-slate-900">薪酬核算系统</div><div className="text-xs text-slate-500">v7.1 · 月度薪酬自动核算</div></div>
+            <div><div className="font-bold text-slate-900">薪酬核算系统</div><div className="text-xs text-slate-500">v7.2 · 月度薪酬自动核算</div></div>
           </div>
           <div className="hidden md:flex items-center gap-3 text-sm text-slate-600">
             <span className="px-2.5 py-1 bg-slate-100 rounded-md">当前账户：<b className="text-slate-900">{currentUser}</b></span>
@@ -1296,7 +1288,7 @@ function SalaryWorkflow({ currentUser, users, onUsersChange, onLogout }) {
       {!calculating && step === 1 && <Step1Upload onComplete={handleStep1Done} />}
       {!calculating && step === 2 && <Step2Parameters data={data} onBack={() => setStep(1)} onComplete={handleStep2Done} />}
       {!calculating && step === 4 && result && <ResultPanel result={result} params={params} data={data} onBack={() => setStep(2)} onRestart={handleRestart} />}
-      <footer className="max-w-7xl mx-auto px-4 py-8 text-center text-xs text-slate-400">居间单价数据保存在本地浏览器，下次打开仍可使用。</footer>
+      <footer className="max-w-7xl mx-auto px-4 py-8 text-center text-xs text-slate-400">居间费与负毛利订单从回款明细 Z / AA 列自动读取；如需调整请修改 Excel 后重新上传。</footer>
       {accountOpen && <AccountManager users={users} onUsersChange={onUsersChange} onClose={() => setAccountOpen(false)} />}
     </div>
   );
