@@ -445,6 +445,7 @@ function exportPersonXlsx(p, month) {
       <td style="${S.thBlue}">销售提成</td>
       <td style="${S.th}">居间费<br>(元/kg)</td>
       <td style="${S.thGreen}">溢价率</td>
+      <td style="${S.thGreen}">溢价系数</td>
       <td style="${S.thGreen}">溢价奖金</td>
     </tr>`;
     p.myRegular.forEach((l, idx) => {
@@ -464,6 +465,7 @@ function exportPersonXlsx(p, month) {
         <td style="${S.tdBlue}font-weight:bold;">${cny(l._saleCommission)}</td>
         <td style="${S.tdNum}">${l._priceDeduction||0}</td>
         <td style="${premNeg ? S.tdRed : S.tdGreen}">${l._premiumRatio!==null ? pct(l._premiumRatio,1) : "—"}</td>
+        <td style="${S.tdGreen}">${l._premiumRate ? l._premiumRate : "—"}</td>
         <td style="${S.tdGreen}font-weight:bold;">${cny(l._premiumCommission)}</td>
       </tr>`;
     });
@@ -475,6 +477,7 @@ function exportPersonXlsx(p, month) {
       <td colspan="3" style="border:none;"></td>
       <td colspan="2" style="border:none;"></td>
       <td style="${S.totBlue}">${cny(sumSale)}</td>
+      <td style="border:none;"></td>
       <td style="border:none;"></td>
       <td style="border:none;"></td>
       <td style="${S.totGreen}">${cny(sumPrem)}</td>
