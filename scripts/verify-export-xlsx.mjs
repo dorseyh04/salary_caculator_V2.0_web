@@ -68,3 +68,21 @@ const allTrs = sec.match(/<tr>[\s\S]*?<\/tr>/g) || [];
 const totTr = allTrs.find((t) => t.includes(">合计<")) || "";
 const totCells = (totTr.match(/<td /g) || []).length;
 console.log(`合计行单元格数: ${totCells}（应=10: colspan3+kg+amt+colspan3+colspan2+销售提成+居间空+溢价率空+溢价系数空+溢价合计）→ ${totCells === 10 ? "✅" : "❌"}`);
+
+// ── 追加验证：Markdown 报告的溢价系数列 ──
+const s3 = src.indexOf("function generatePersonMarkdown");
+const e3 = src.indexOf("function generateAllMarkdown");
+const generatePersonMarkdown = new Function(
+  `${src.slice(s1, e1 + e1Marker.length)}; ${src.slice(s3, e3)}; return generatePersonMarkdown;`
+)();
+const md = generatePersonMarkdown(cui, "2026年8月");
+const mdHeader = md.split("\n").find((l) => l.includes("溢价系数"));
+const mdFirstData = md.split("\n").find((l) => l.includes(cui.myRegular[0].销售订单));
+const mdHeaderCols = mdHeader ? mdHeader.split("|").length - 2 : 0;
+const mdDataCols = mdFirstData ? mdFirstData.split("|").length - 2 : 0;
+console.log(`\n—— Markdown 报告验证 ——`);
+console.log(`明细表头含「溢价系数」: ${mdHeader ? "✅" : "❌"}`);
+console.log(`表头列数: ${mdHeaderCols}（应=13）→ ${mdHeaderCols === 13 ? "✅" : "❌"}`);
+console.log(`数据行列数: ${mdDataCols}（应=13）→ ${mdDataCols === 13 ? "✅" : "❌"}`);
+const mdPremLine = md.split("\n").find((l) => { const m = cui.myRegular.find((x) => x._premiumRate > 0 && l.includes(x.销售订单)); return m; });
+console.log(`含溢价行的系数渲染(应含 0.15/0.2/0.3 之一): ${mdPremLine && /0\.(15|2|3)\s*\|/.test(mdPremLine) ? "✅" : "❌"} ${mdPremLine ? "→ " + mdPremLine.slice(0, 80) + "…" : ""}`);

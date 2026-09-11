@@ -558,17 +558,18 @@ function generatePersonMarkdown(p, month) {
   if (p.myRegular.length === 0) {
     lines.push("（无）");
   } else {
-    lines.push("| 订单号 | 分类 | 客户名称 | 核定公斤 | 含税金额 | 出厂售价(元/kg) | 基价(元/kg) | 提成系数 | 活跃度 | 销售提成 | 溢价率 | 溢价奖金 |");
-    lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|");
+    lines.push("| 订单号 | 分类 | 客户名称 | 核定公斤 | 含税金额 | 出厂售价(元/kg) | 基价(元/kg) | 提成系数 | 活跃度 | 销售提成 | 溢价率 | 溢价系数 | 溢价奖金 |");
+    lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     p.myRegular.forEach((l) => {
       const premRate = l._premiumRatio != null && !isNaN(l._premiumRatio) ? (l._premiumRatio * 100).toFixed(1) + "%" : "—";
-      lines.push(`| ${l.销售订单} | ${String(l.分类 || "").replace(/⚠负毛利$/, "")}${l._isNegative ? "⚠负毛利" : ""} | ${l.售达方描述 || ""} | ${Number(l._kg || 0).toFixed(2)} | ${fmtCNY(l.含税金额)} | ${l._exFactoryPrice != null ? Number(l._exFactoryPrice).toFixed(4) : "—"} | ${l._basePrice != null ? Number(l._basePrice).toFixed(4) : "—"} | ${l._commRate != null ? (l._commRate * 100).toFixed(2) + "%" : "—"} | ${l._activityCoef ?? "—"} | ${fmtCNY(l._saleCommission)} | ${premRate} | ${fmtCNY(l._premiumCommission)} |`);
+      const premCoef = l._premiumRate ? String(l._premiumRate) : "—";
+      lines.push(`| ${l.销售订单} | ${String(l.分类 || "").replace(/⚠负毛利$/, "")}${l._isNegative ? "⚠负毛利" : ""} | ${l.售达方描述 || ""} | ${Number(l._kg || 0).toFixed(2)} | ${fmtCNY(l.含税金额)} | ${l._exFactoryPrice != null ? Number(l._exFactoryPrice).toFixed(4) : "—"} | ${l._basePrice != null ? Number(l._basePrice).toFixed(4) : "—"} | ${l._commRate != null ? (l._commRate * 100).toFixed(2) + "%" : "—"} | ${l._activityCoef ?? "—"} | ${fmtCNY(l._saleCommission)} | ${premRate} | ${premCoef} | ${fmtCNY(l._premiumCommission)} |`);
     });
     const sumKg = p.myRegular.reduce((s, l) => s + l._kg, 0);
     const sumAmt = p.myRegular.reduce((s, l) => s + Number(l.含税金额 || 0), 0);
     const sumSale = p.myRegular.reduce((s, l) => s + l._saleCommission, 0);
     const sumPrem = p.myRegular.reduce((s, l) => s + l._premiumCommission, 0);
-    lines.push(`| **合计** | | | **${Number(sumKg).toFixed(2)}** | **${fmtCNY(sumAmt)}** | | | | | **${fmtCNY(sumSale)}** | | **${fmtCNY(sumPrem)}** |`);
+    lines.push(`| **合计** | | | **${Number(sumKg).toFixed(2)}** | **${fmtCNY(sumAmt)}** | | | | | **${fmtCNY(sumSale)}** | | | **${fmtCNY(sumPrem)}** |`);
   }
   lines.push("");
   if (p.myTrade.length > 0) {
@@ -1061,7 +1062,7 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
                         <div className="overflow-x-auto"><table className="w-full text-xs"><thead className="bg-slate-50/50"><tr className="text-left text-slate-600">
                           <th className="px-2 py-2">订单号</th><th className="px-2 py-2">分类</th><th className="px-2 py-2">售达方</th><th className="px-2 py-2 text-right">核定kg</th><th className="px-2 py-2 text-right">含税金额</th><th className="px-2 py-2 text-right">运费/kg</th><th className="px-2 py-2 text-right">出厂价</th><th className="px-2 py-2 text-right">基价</th>
                           <th className={`px-2 py-2 text-right ${saleColor}`}>系数</th><th className="px-2 py-2 text-right">活跃度</th><th className={`px-2 py-2 text-right ${saleColor}`}>销售提成</th>
-                          <th className="px-2 py-2 text-right">居间</th><th className={`px-2 py-2 text-right`}>溢价率</th><th className={`px-2 py-2 text-right ${premiumColor}`}>溢价奖金</th>
+                          <th className="px-2 py-2 text-right">居间</th><th className={`px-2 py-2 text-right`}>溢价率</th><th className={`px-2 py-2 text-right ${premiumColor}`}>溢价系数</th><th className={`px-2 py-2 text-right ${premiumColor}`}>溢价奖金</th>
                         </tr></thead><tbody>
                           {(() => { let sumSale = 0, sumPrem = 0, sumAmt = 0, sumKg = 0; return (<>
                             {p.myRegular.map((l) => { sumSale += l._saleCommission; sumPrem += l._premiumCommission; sumAmt += l.含税金额; sumKg += l._kg;
@@ -1081,6 +1082,7 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
                                 <td className={`px-2 py-1.5 text-right tabular-nums font-semibold ${saleColor}`}>{fmtNum(l._saleCommission)}</td>
                                 <td className="px-2 py-1.5 text-right tabular-nums">{l._priceDeduction || 0}</td>
                                 <td className={`px-2 py-1.5 text-right tabular-nums ${premRatioNeg ? negPremColor : ""}`}>{l._premiumRatio !== null ? fmtPct(l._premiumRatio, 1) : "—"}</td>
+                                <td className={`px-2 py-1.5 text-right tabular-nums ${premiumColor}`}>{l._premiumRate ? l._premiumRate : "—"}</td>
                                 <td className={`px-2 py-1.5 text-right tabular-nums font-semibold ${premiumColor}`}>{fmtNum(l._premiumCommission)}</td>
                               </tr>); })}
                             <tr className="border-t-2 border-slate-300 bg-slate-100 font-semibold text-xs">
@@ -1089,7 +1091,7 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
                               <td className="px-2 py-2 text-right tabular-nums">{fmtNum(sumAmt)}</td>
                               <td colSpan={5}></td>
                               <td className={`px-2 py-2 text-right tabular-nums ${saleColor}`}>{fmtNum(sumSale)}</td>
-                              <td colSpan={2}></td>
+                              <td colSpan={3}></td>
                               <td className={`px-2 py-2 text-right tabular-nums ${premiumColor}`}>{fmtNum(sumPrem)}</td>
                             </tr>
                           </>); })()}
