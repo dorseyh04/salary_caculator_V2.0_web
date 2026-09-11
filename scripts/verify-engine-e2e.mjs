@@ -33,8 +33,11 @@ const rows2 = XLSX.utils.sheet_to_json(wb2.Sheets[s2], { header: 1, defval: "", 
 const persons = parsePerformanceRows(rows2);
 console.log("绩效分表人员:", persons.map((p) => `${p.name}(分=${p.perfScore},基薪=${p.defaultBaseSalary},绩效基数=${p.defaultPerfBase})`).join("、"));
 
-// ── 3. 跑引擎（personSettings/tradeMarginInputs/activityOverrides 全默认）──
-const result = runCalculation({ settlements, priceMap, persons, personSettings: {}, tradeMarginInputs: {}, activityOverrides: {} });
+// ── 3. 跑引擎（personSettings/tradeMarginInputs/activityOverrides 全默认；
+//        注入商机兑现与误差调整测试值）──
+const bonusInputs = { "崔春辉": 500 };
+const adjustmentInputs = { "刘洋": -200, "张哲": 150 };
+const result = runCalculation({ settlements, priceMap, persons, personSettings: {}, tradeMarginInputs: {}, activityOverrides: {}, bonusInputs, adjustmentInputs });
 
 // ── 4. 断言与报告 ──
 const { personResults, warnings, validRegular, tradeLines, dropped } = result;
@@ -46,13 +49,26 @@ const interimApplied = validRegular.filter((l) => l._priceDeduction > 0);
 console.log(`居间费生效行: ${interimApplied.length}（8月应=0）→ ${interimApplied.length === 0 ? "✅" : "❌"}`);
 
 console.log("\n—— 全员薪酬汇总 ——");
-console.log("姓名 | 基本工资 | 绩效工资 | 销售提成 | 溢价奖金 | 贸易提成 | 合计");
+console.log("姓名 | 基本工资 | 绩效工资 | 销售提成 | 溢价奖金 | 贸易提成 | 商机兑现 | 误差调整 | 合计");
 let gTotal = 0;
 for (const p of personResults) {
   gTotal += p.totalSalary;
-  console.log(`${p.name} | ${p.baseSalary.toFixed(2)} | ${p.perfWage.toFixed(2)} | ${p.totalSaleCommission.toFixed(2)} | ${p.totalPremium.toFixed(2)} | ${p.totalTrade.toFixed(2)} | ${p.totalSalary.toFixed(2)}`);
+  console.log(`${p.name} | ${p.baseSalary.toFixed(2)} | ${p.perfWage.toFixed(2)} | ${p.totalSaleCommission.toFixed(2)} | ${p.totalPremium.toFixed(2)} | ${p.totalTrade.toFixed(2)} | ${p.bonus.toFixed(2)} | ${p.adjustment.toFixed(2)} | ${p.totalSalary.toFixed(2)}`);
 }
 console.log(`合计薪酬总额: ${gTotal.toFixed(2)}`);
+
+// ── 商机兑现/误差调整断言 ──
+console.log("\n—— 商机兑现 / 误差调整断言 ——");
+let adjOk = true;
+for (const p of personResults) {
+  const expectBonus = Number(bonusInputs[p.name]) || 0;
+  const expectAdj = Number(adjustmentInputs[p.name]) || 0;
+  const expectedTotal = p.baseSalary + p.perfWage + p.totalSaleCommission + p.totalPremium + p.totalTrade + expectBonus + expectAdj;
+  const ok = Math.abs(p.totalSalary - expectedTotal) < 0.01 && p.bonus === expectBonus && p.adjustment === expectAdj;
+  if (!ok) adjOk = false;
+  console.log(`${p.name}: 商机=${p.bonus}(应${expectBonus}) 误差=${p.adjustment}(应${expectAdj}) 合计=${p.totalSalary.toFixed(2)}(应${expectedTotal.toFixed(2)}) → ${ok ? "✅" : "❌"}`);
+}
+console.log(`商机/误差计入薪酬总额: ${adjOk ? "✅ 全部正确" : "❌ 存在偏差"}`);
 
 console.log("\n—— 交叉验证（全部=常规+贸易+剔除，单位元）——");
 let allOk = true;

@@ -19,6 +19,8 @@ import {
   Users,
   TrendingUp,
   Activity,
+  Award,
+  Scale,
   LogOut,
   ShieldCheck,
   UserPlus,
@@ -181,7 +183,7 @@ async function parsePerformanceWorkbook(file) {
 // ============================================================
 // 计算引擎（无抵扣，使用含税金额；负毛利/居间费逐行读取自回款明细 Z/AA 列）
 // ============================================================
-function runCalculation({ settlements, priceMap, persons, personSettings, tradeMarginInputs, activityOverrides }) {
+function runCalculation({ settlements, priceMap, persons, personSettings, tradeMarginInputs, activityOverrides, bonusInputs = {}, adjustmentInputs = {} }) {
   const warnings = [];
   const allLines = [], validRegular = [], tradeLines = [], dropped = [];
   const activityMap = new Map(Object.entries(activityOverrides));
@@ -279,14 +281,17 @@ function runCalculation({ settlements, priceMap, persons, personSettings, tradeM
     const totalSaleCommission = myRegular.reduce((s, l) => s + l._saleCommission, 0);
     const totalPremium = myRegular.reduce((s, l) => s + l._premiumCommission, 0);
     const totalTrade = myTrade.reduce((s, l) => s + (l._tradeCommission || 0), 0);
-    const totalSalary = baseSalary + perfWage + totalSaleCommission + totalPremium + totalTrade;
+    // 商机兑现（月度特别奖励）与误差调整（正补负扣）：逐人手工录入，单独计入薪酬总额
+    const bonus = Number(bonusInputs[p.name]) || 0;
+    const adjustment = Number(adjustmentInputs[p.name]) || 0;
+    const totalSalary = baseSalary + perfWage + totalSaleCommission + totalPremium + totalTrade + bonus + adjustment;
 
     const allReceipt = myAll.reduce((s, l) => s + (Number(l.含税金额) || 0), 0);
     const validReceipt = myRegular.reduce((s, l) => s + (Number(l.含税金额) || 0), 0);
     const tradeReceipt = myTrade.reduce((s, l) => s + (Number(l.含税金额) || 0), 0);
     const droppedReceipt = myDropped.reduce((s, l) => s + (Number(l.含税金额) || 0), 0);
 
-    return { ...p, baseSalary, perfBase, perfWage, myRegular, myTrade, myDropped, totalSaleCommission, totalPremium, totalTrade, totalSalary, allReceipt, validReceipt, tradeReceipt, droppedReceipt };
+    return { ...p, baseSalary, perfBase, perfWage, myRegular, myTrade, myDropped, totalSaleCommission, totalPremium, totalTrade, bonus, adjustment, totalSalary, allReceipt, validReceipt, tradeReceipt, droppedReceipt };
   });
 
   return { warnings, personResults, allLines, validRegular, tradeLines, dropped };
@@ -393,6 +398,8 @@ function exportPersonXlsx(p, month) {
     ["销售提成", p.totalSaleCommission, ""],
     ["溢价奖金", p.totalPremium, ""],
     ["贸易提成", p.totalTrade, ""],
+    ["商机兑现", p.bonus, ""],
+    ["误差调整", p.adjustment, ""],
   ];
   summaryRows.forEach(([label, val, note]) => {
     html += `<tr>
@@ -540,6 +547,8 @@ function generatePersonMarkdown(p, month) {
   lines.push(`| 销售提成 | ${fmtCNY(p.totalSaleCommission)} |`);
   lines.push(`| 溢价奖金 | ${fmtCNY(p.totalPremium)} |`);
   lines.push(`| 贸易提成 | ${fmtCNY(p.totalTrade)} |`);
+  lines.push(`| 商机兑现 | ${fmtCNY(p.bonus)} |`);
+  lines.push(`| 误差调整 | ${fmtCNY(p.adjustment)} |`);
   lines.push(`| **合计薪酬** | **${fmtCNY(p.totalSalary)}** |`);
   lines.push("");
   lines.push("### 常规订单明细");
@@ -580,14 +589,14 @@ function generateAllMarkdown(personResults, warnings, month) {
   lines.push(`**核算月份**: ${month}  ·  **生成时间**: ${new Date().toLocaleString("zh-CN")}`);
   lines.push("");
   lines.push("## 薪酬汇总表");
-  lines.push("| 业务员 | 基本工资 | 绩效工资 | 销售提成 | 溢价奖金 | 贸易提成 | **合计** |");
-  lines.push("|---|---|---|---|---|---|---|");
-  let tBase = 0, tPerf = 0, tSale = 0, tPrem = 0, tTrade = 0, tTotal = 0;
+  lines.push("| 业务员 | 基本工资 | 绩效工资 | 销售提成 | 溢价奖金 | 贸易提成 | 商机兑现 | 误差调整 | **合计** |");
+  lines.push("|---|---|---|---|---|---|---|---|---|");
+  let tBase = 0, tPerf = 0, tSale = 0, tPrem = 0, tTrade = 0, tBonus = 0, tAdj = 0, tTotal = 0;
   personResults.forEach((p) => {
-    tBase += p.baseSalary; tPerf += p.perfWage; tSale += p.totalSaleCommission; tPrem += p.totalPremium; tTrade += p.totalTrade; tTotal += p.totalSalary;
-    lines.push(`| ${p.name} | ${fmtCNY(p.baseSalary)} | ${fmtCNY(p.perfWage)} | ${fmtCNY(p.totalSaleCommission)} | ${fmtCNY(p.totalPremium)} | ${fmtCNY(p.totalTrade)} | **${fmtCNY(p.totalSalary)}** |`);
+    tBase += p.baseSalary; tPerf += p.perfWage; tSale += p.totalSaleCommission; tPrem += p.totalPremium; tTrade += p.totalTrade; tBonus += p.bonus; tAdj += p.adjustment; tTotal += p.totalSalary;
+    lines.push(`| ${p.name} | ${fmtCNY(p.baseSalary)} | ${fmtCNY(p.perfWage)} | ${fmtCNY(p.totalSaleCommission)} | ${fmtCNY(p.totalPremium)} | ${fmtCNY(p.totalTrade)} | ${fmtCNY(p.bonus)} | ${fmtCNY(p.adjustment)} | **${fmtCNY(p.totalSalary)}** |`);
   });
-  lines.push(`| **合计** | **${fmtCNY(tBase)}** | **${fmtCNY(tPerf)}** | **${fmtCNY(tSale)}** | **${fmtCNY(tPrem)}** | **${fmtCNY(tTrade)}** | **${fmtCNY(tTotal)}** |`);
+  lines.push(`| **合计** | **${fmtCNY(tBase)}** | **${fmtCNY(tPerf)}** | **${fmtCNY(tSale)}** | **${fmtCNY(tPrem)}** | **${fmtCNY(tTrade)}** | **${fmtCNY(tBonus)}** | **${fmtCNY(tAdj)}** | **${fmtCNY(tTotal)}** |`);
   lines.push("");
   personResults.forEach((p) => { lines.push("---"); lines.push(""); lines.push(generatePersonMarkdown(p, month)); });
   if (warnings.length > 0) { lines.push("---"); lines.push("## 异常预警"); lines.push(""); warnings.forEach((w) => lines.push(`- **[${w.type}]** ${w.msg}`)); }
@@ -723,6 +732,9 @@ function Step2Parameters({ data, onBack, onComplete }) {
     return Array.from(map.values()).sort((a, b) => a.classification.localeCompare(b.classification, "zh-CN"));
   }, [settlements]);
   const [activityOverrides, setActivityOverrides] = useState({});
+  // 商机兑现（逐人金额，单独计入薪酬总额）与误差调整（正补负扣）
+  const [bonusInputs, setBonusInputs] = useState({});
+  const [adjustmentInputs, setAdjustmentInputs] = useState({});
 
   const updatePS = (name, key, val) => setPersonSettings((p) => ({ ...p, [name]: { ...p[name], [key]: val === "" ? "" : val } }));
   const restorePS = (name) => { const p = persons.find((x) => x.name === name); if (p) setPersonSettings((prev) => ({ ...prev, [name]: { baseSalary: p.defaultBaseSalary, perfBase: p.defaultPerfBase } })); };
@@ -734,9 +746,11 @@ function Step2Parameters({ data, onBack, onComplete }) {
     { id: "negative", label: "负毛利订单", icon: FileWarning, count: negativeRows.length },
     { id: "trade", label: "贸易毛利", icon: TrendingUp, count: tradeOrdersRaw.length },
     { id: "activity", label: "活跃度系数", icon: Activity, count: customerActivityList.length },
+    { id: "bonus", label: "商机兑现", icon: Award, count: Object.values(bonusInputs).filter((v) => Number(v) > 0).length },
+    { id: "adjustment", label: "误差调整", icon: Scale, count: Object.values(adjustmentInputs).filter((v) => v !== "" && v !== undefined && v !== null && !isNaN(Number(v)) && Number(v) !== 0).length },
   ];
 
-  const handleSubmit = () => onComplete({ personSettings, tradeMarginInputs, activityOverrides });
+  const handleSubmit = () => onComplete({ personSettings, tradeMarginInputs, activityOverrides, bonusInputs, adjustmentInputs });
 
   return (
     <div className="max-w-7xl mx-auto px-4 pb-12">
@@ -857,6 +871,38 @@ function Step2Parameters({ data, onBack, onComplete }) {
                 </tr>); })}
             </tbody></table></div>
           </div>)}
+
+        {activeTab === "bonus" && (
+          <div>
+            <h3 className="font-semibold text-slate-900 mb-1">商机兑现（月度特别奖励）</h3>
+            <p className="text-sm text-slate-500 mb-4">商机完成后的额外奖励，逐人填写金额（元），<b>单独计入该员工当月薪酬总额</b>。不填按 0 处理。</p>
+            <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left bg-slate-50 border-y border-slate-200">
+              <th className="px-3 py-2.5 font-medium">人员</th><th className="px-3 py-2.5 font-medium">等级</th><th className="px-3 py-2.5 font-medium">商机兑现金额（元）</th>
+            </tr></thead><tbody>
+              {persons.map((p) => (
+                <tr key={p.name} className="border-b border-slate-100 hover:bg-slate-50/50">
+                  <td className="px-3 py-2.5 font-semibold text-slate-900">{p.name}</td>
+                  <td className="px-3 py-2.5 text-slate-600">{p.level}</td>
+                  <td className="px-3 py-2.5"><input type="number" step="0.01" min="0" placeholder="0" value={bonusInputs[p.name] ?? ""} onChange={(e) => setBonusInputs((prev) => ({ ...prev, [p.name]: e.target.value }))} className="w-44 px-2 py-1 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-slate-400" /></td>
+                </tr>))}
+            </tbody></table></div>
+          </div>)}
+
+        {activeTab === "adjustment" && (
+          <div>
+            <h3 className="font-semibold text-slate-900 mb-1">误差调整（多发扣回 / 少发补发）</h3>
+            <p className="text-sm text-slate-500 mb-4">用于处理往月发错或核算错的差额：<b className="text-emerald-700">正数 = 补发</b>（加入本月薪酬），<b className="text-red-700">负数 = 扣回</b>（从本月薪酬扣减）。不填按 0 处理。</p>
+            <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left bg-slate-50 border-y border-slate-200">
+              <th className="px-3 py-2.5 font-medium">人员</th><th className="px-3 py-2.5 font-medium">等级</th><th className="px-3 py-2.5 font-medium">误差调整金额（元，可正可负）</th>
+            </tr></thead><tbody>
+              {persons.map((p) => { const val = adjustmentInputs[p.name] ?? ""; const neg = val !== "" && Number(val) < 0; return (
+                <tr key={p.name} className="border-b border-slate-100 hover:bg-slate-50/50">
+                  <td className="px-3 py-2.5 font-semibold text-slate-900">{p.name}</td>
+                  <td className="px-3 py-2.5 text-slate-600">{p.level}</td>
+                  <td className="px-3 py-2.5"><input type="number" step="0.01" placeholder="0" value={val} onChange={(e) => setAdjustmentInputs((prev) => ({ ...prev, [p.name]: e.target.value }))} className={`w-44 px-2 py-1 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-slate-400 ${neg ? "border-red-300 text-red-700 bg-red-50/50" : "border-slate-300"}`} /></td>
+                </tr>); })}
+            </tbody></table></div>
+          </div>)}
       </div>
       <div className="flex justify-between mt-6">
         <button onClick={onBack} className="px-5 py-3 bg-white border border-slate-300 text-slate-700 rounded-xl font-medium hover:bg-slate-50 flex items-center gap-2"><ChevronLeft size={18} /> 上一步</button>
@@ -874,7 +920,7 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
   const [activeReport, setActiveReport] = useState("summary");
   const [expandedPerson, setExpandedPerson] = useState(null);
 
-  const totals = personResults.reduce((a, p) => ({ base: a.base + p.baseSalary, perf: a.perf + p.perfWage, sale: a.sale + p.totalSaleCommission, premium: a.premium + p.totalPremium, trade: a.trade + p.totalTrade, total: a.total + p.totalSalary }), { base: 0, perf: 0, sale: 0, premium: 0, trade: 0, total: 0 });
+  const totals = personResults.reduce((a, p) => ({ base: a.base + p.baseSalary, perf: a.perf + p.perfWage, sale: a.sale + p.totalSaleCommission, premium: a.premium + p.totalPremium, trade: a.trade + p.totalTrade, bonus: a.bonus + p.bonus, adjustment: a.adjustment + p.adjustment, total: a.total + p.totalSalary }), { base: 0, perf: 0, sale: 0, premium: 0, trade: 0, bonus: 0, adjustment: 0, total: 0 });
   const month = data.settlementData.month || "";
 
   // 导出下拉：个人 → Excel(.xlsx)，全员 → Markdown(.md)
@@ -890,9 +936,9 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
 
   // CSV 汇总
   const exportCSV = useCallback(() => {
-    const rows = [["业务员", "基本工资", "绩效工资", "销售提成", "溢价奖金", "贸易提成", "合计"]];
-    personResults.forEach((p) => rows.push([p.name, p.baseSalary.toFixed(2), p.perfWage.toFixed(2), p.totalSaleCommission.toFixed(2), p.totalPremium.toFixed(2), p.totalTrade.toFixed(2), p.totalSalary.toFixed(2)]));
-    rows.push(["合计", totals.base.toFixed(2), totals.perf.toFixed(2), totals.sale.toFixed(2), totals.premium.toFixed(2), totals.trade.toFixed(2), totals.total.toFixed(2)]);
+    const rows = [["业务员", "基本工资", "绩效工资", "销售提成", "溢价奖金", "贸易提成", "商机兑现", "误差调整", "合计"]];
+    personResults.forEach((p) => rows.push([p.name, p.baseSalary.toFixed(2), p.perfWage.toFixed(2), p.totalSaleCommission.toFixed(2), p.totalPremium.toFixed(2), p.totalTrade.toFixed(2), p.bonus.toFixed(2), p.adjustment.toFixed(2), p.totalSalary.toFixed(2)]));
+    rows.push(["合计", totals.base.toFixed(2), totals.perf.toFixed(2), totals.sale.toFixed(2), totals.premium.toFixed(2), totals.trade.toFixed(2), totals.bonus.toFixed(2), totals.adjustment.toFixed(2), totals.total.toFixed(2)]);
     const csv = "\uFEFF" + rows.map((r) => r.map((c) => `"${c}"`).join(",")).join("\r\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -913,8 +959,8 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
       </div>
 
       {/* KPI */}
-      <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-6">
-        {[{ label: "薪酬总额", value: totals.total, accent: "bg-slate-900 text-white" }, { label: "基本工资", value: totals.base }, { label: "绩效工资", value: totals.perf }, { label: "销售提成", value: totals.sale, cls: "bg-blue-50 border-blue-200" }, { label: "溢价奖金", value: totals.premium, cls: "bg-emerald-50 border-emerald-200" }, { label: "贸易提成", value: totals.trade }].map((k, i) => (
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        {[{ label: "薪酬总额", value: totals.total, accent: "bg-slate-900 text-white" }, { label: "基本工资", value: totals.base }, { label: "绩效工资", value: totals.perf }, { label: "销售提成", value: totals.sale, cls: "bg-blue-50 border-blue-200" }, { label: "溢价奖金", value: totals.premium, cls: "bg-emerald-50 border-emerald-200" }, { label: "贸易提成", value: totals.trade }, { label: "商机兑现", value: totals.bonus }, { label: "误差调整", value: totals.adjustment }].map((k, i) => (
           <div key={i} className={`rounded-xl p-4 border ${k.accent || k.cls || "bg-white border-slate-200"}`}>
             <div className={`text-xs font-medium ${k.accent ? "text-slate-300" : "text-slate-500"}`}>{k.label}</div>
             <div className="text-lg md:text-xl font-bold mt-1">¥ {fmtNum(k.value, 2)}</div>
@@ -935,18 +981,18 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
           <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="bg-slate-50 border-b border-slate-200">
             <th className="px-4 py-3 text-left font-semibold">业务员</th><th className="px-4 py-3 text-right font-semibold">基本工资</th><th className="px-4 py-3 text-right font-semibold">绩效工资</th>
             <th className={`px-4 py-3 text-right font-semibold ${saleColor}`}>销售提成</th><th className={`px-4 py-3 text-right font-semibold ${premiumColor}`}>溢价奖金</th>
-            <th className="px-4 py-3 text-right font-semibold">贸易提成</th><th className="px-4 py-3 text-right font-semibold bg-slate-100">合计</th>
+            <th className="px-4 py-3 text-right font-semibold">贸易提成</th><th className="px-4 py-3 text-right font-semibold">商机兑现</th><th className="px-4 py-3 text-right font-semibold">误差调整</th><th className="px-4 py-3 text-right font-semibold bg-slate-100">合计</th>
           </tr></thead><tbody>
             {personResults.map((p) => (
               <tr key={p.name} className="border-b border-slate-100 hover:bg-slate-50/50">
                 <td className="px-4 py-3 font-semibold">{p.name}</td><td className="px-4 py-3 text-right">{fmtCNY(p.baseSalary)}</td><td className="px-4 py-3 text-right">{fmtCNY(p.perfWage)}</td>
                 <td className={`px-4 py-3 text-right ${saleColor}`}>{fmtCNY(p.totalSaleCommission)}</td><td className={`px-4 py-3 text-right ${premiumColor}`}>{fmtCNY(p.totalPremium)}</td>
-                <td className="px-4 py-3 text-right">{fmtCNY(p.totalTrade)}</td><td className="px-4 py-3 text-right font-bold bg-slate-50">{fmtCNY(p.totalSalary)}</td>
+                <td className="px-4 py-3 text-right">{fmtCNY(p.totalTrade)}</td><td className="px-4 py-3 text-right">{fmtCNY(p.bonus)}</td><td className={`px-4 py-3 text-right ${p.adjustment < 0 ? "text-red-600" : ""}`}>{fmtCNY(p.adjustment)}</td><td className="px-4 py-3 text-right font-bold bg-slate-50">{fmtCNY(p.totalSalary)}</td>
               </tr>))}
             <tr className="bg-slate-900 text-white font-semibold">
               <td className="px-4 py-3">合计</td><td className="px-4 py-3 text-right">{fmtCNY(totals.base)}</td><td className="px-4 py-3 text-right">{fmtCNY(totals.perf)}</td>
               <td className="px-4 py-3 text-right">{fmtCNY(totals.sale)}</td><td className="px-4 py-3 text-right">{fmtCNY(totals.premium)}</td>
-              <td className="px-4 py-3 text-right">{fmtCNY(totals.trade)}</td><td className="px-4 py-3 text-right">{fmtCNY(totals.total)}</td>
+              <td className="px-4 py-3 text-right">{fmtCNY(totals.trade)}</td><td className="px-4 py-3 text-right">{fmtCNY(totals.bonus)}</td><td className="px-4 py-3 text-right">{fmtCNY(totals.adjustment)}</td><td className="px-4 py-3 text-right">{fmtCNY(totals.total)}</td>
             </tr>
           </tbody></table></div>
           <div className="p-4 flex flex-wrap items-center gap-2 bg-slate-50/50 border-t border-slate-200">
@@ -996,8 +1042,8 @@ function ResultPanel({ result, params, data, onBack, onRestart }) {
                 {expanded && (
                   <div className="border-t border-slate-200 p-5 space-y-5 bg-slate-50/30">
                     {/* 薪酬构成 */}
-                    <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-                      {[{ label: "基本工资", v: p.baseSalary }, { label: "绩效工资", v: p.perfWage }, { label: "销售提成", v: p.totalSaleCommission, cls: "border-blue-200 bg-blue-50" }, { label: "溢价奖金", v: p.totalPremium, cls: "border-emerald-200 bg-emerald-50" }, { label: "贸易提成", v: p.totalTrade }].map((x, i) => (
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      {[{ label: "基本工资", v: p.baseSalary }, { label: "绩效工资", v: p.perfWage }, { label: "销售提成", v: p.totalSaleCommission, cls: "border-blue-200 bg-blue-50" }, { label: "溢价奖金", v: p.totalPremium, cls: "border-emerald-200 bg-emerald-50" }, { label: "贸易提成", v: p.totalTrade }, { label: "商机兑现", v: p.bonus }, { label: "误差调整", v: p.adjustment, cls: p.adjustment < 0 ? "border-red-200 bg-red-50" : undefined }].map((x, i) => (
                         <div key={i} className={`border rounded-lg p-2.5 ${x.cls || "border-slate-200 bg-white"}`}><div className="text-xs text-slate-500">{x.label}</div><div className="font-semibold text-slate-900 text-sm">¥ {fmtNum(x.v)}</div></div>))}
                     </div>
                     {/* 绩效推演 */}
@@ -1270,7 +1316,7 @@ function SalaryWorkflow({ currentUser, users, onUsersChange, onLogout }) {
         <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-slate-800 to-slate-900 text-white flex items-center justify-center font-bold">薪</div>
-            <div><div className="font-bold text-slate-900">薪酬核算系统</div><div className="text-xs text-slate-500">v7.2 · 月度薪酬自动核算</div></div>
+            <div><div className="font-bold text-slate-900">薪酬核算系统</div><div className="text-xs text-slate-500">v7.3 · 月度薪酬自动核算</div></div>
           </div>
           <div className="hidden md:flex items-center gap-3 text-sm text-slate-600">
             <span className="px-2.5 py-1 bg-slate-100 rounded-md">当前账户：<b className="text-slate-900">{currentUser}</b></span>
