@@ -236,7 +236,13 @@ function runCalculation({ settlements, priceMap, persons, personSettings, tradeM
     else { const pl = getSalesCommissionRate(r.分类); commRate = pl.rate; commRateSource = `${r.分类}`; if (pl.warning) warnings.push({ type: "分类异常", order: r.销售订单, person: r.业务经理, msg: `订单 ${r.销售订单}: ${pl.warning}` }); }
     lineBase._commRate = commRate; lineBase._commRateSource = commRateSource;
 
-    const effectivePrice = Math.min(lineBase._exFactoryPrice, price);
+    // 居间费逐行读取自回款明细 AA 列：>0 时先修正出厂售价，再判定销售提成基数（2026-10-12 制度修订）
+    const priceDed = Number(r.居间费) > 0 ? Number(r.居间费) : 0;
+    lineBase._priceDeduction = priceDed;
+    // 出厂修正单价 = 出厂售价 - 居间费：销售提成与溢价提成共用同一修正口径
+    lineBase._adjPrice = lineBase._exFactoryPrice - priceDed;
+
+    const effectivePrice = Math.min(lineBase._adjPrice, price);
     lineBase._commBase = effectivePrice * kg;
 
     let activityCoef;
@@ -247,10 +253,6 @@ function runCalculation({ settlements, priceMap, persons, personSettings, tradeM
     lineBase._activityCoef = activityCoef;
     lineBase._saleCommission = lineBase._commBase * commRate * activityCoef;
 
-    // 居间费逐行读取自回款明细 AA 列：>0 才参与溢价修正，否则按 0
-    const priceDed = Number(r.居间费) > 0 ? Number(r.居间费) : 0;
-    lineBase._priceDeduction = priceDed;
-    lineBase._adjPrice = lineBase._exFactoryPrice - priceDed;
     if (lineBase._adjPrice > price) {
       lineBase._premiumBase = (lineBase._adjPrice - price) * kg;
       lineBase._premiumRatio = lineBase._adjPrice / price - 1;

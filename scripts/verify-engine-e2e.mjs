@@ -86,7 +86,35 @@ for (const w of warnings.slice(0, 15)) console.log(`  [${w.type}] ${w.msg}`);
 // ── 5. 抽样手算核对一笔负毛利行 ──
 const sample = negLines[0];
 if (sample) {
-  const manualComm = Math.min(sample._exFactoryPrice, sample._basePrice) * sample._kg * 0.0025 * sample._activityCoef;
+  const manualComm = Math.min(sample._adjPrice, sample._basePrice) * sample._kg * 0.0025 * sample._activityCoef;
   console.log(`\n抽样核对订单 ${sample.销售订单}: 出厂价=${sample._exFactoryPrice.toFixed(4)} 基价=${sample._basePrice} kg=${sample._kg} 活跃度=${sample._activityCoef}`);
   console.log(`  引擎销售提成=${sample._saleCommission.toFixed(2)} vs 手算=${manualComm.toFixed(2)} → ${Math.abs(sample._saleCommission - manualComm) < 0.01 ? "✅" : "❌"}`);
 }
+
+// ── 6. 新口径回归：居间费扣减销售提成基数（2026-10-12 制度修订）──
+// 出厂修正单价 = 出厂售价 - 居间费；提成基数 = min(出厂修正单价, 基价) × 核定公斤
+// 合成数据（不落真实业务数据到仓库）
+const mkSyn = (o) => ({
+  年: 2026, 月: 9, 销售订单: o.order, 订单类型描述: "", 过账日期: "", 售达方: o.cust, 售达方描述: o.cust,
+  销售合同号: "", 物料编码: o.mat, 物料描述: "测试物料", 单位: "公斤", 数量: o.qty,
+  含税单价: "", 含税金额: o.tax, 收款金额: o.tax, 交易日期: "", 差额: "", 备注: "", 回款月份: "2026-09",
+  分类: o.cat, 类别: o.cat, 分类列名: "分类", 业务经理: "测试员",
+  基价_V列: o.base, 运费单价: o.freight, 提成活跃系数: 0.9, 负毛利标记: "", 居间费: o.interim,
+});
+const synthetic = [
+  // A: 出厂售价=(60000-0.5×1000)/1000=59.5；修正=58.5 < 基价70 → 基数=58500 → 提成=58500×0.8%×0.9=421.2
+  mkSyn({ order: "TEST-A", cust: "C-TEST", mat: "M-1", qty: 1000, tax: 60000, cat: "耐高温材料", base: 70, freight: 0.5, interim: 1 }),
+  // B: 居间费=0 不扣减 → 基数=59500 → 提成=428.4
+  mkSyn({ order: "TEST-B", cust: "C-TEST", mat: "M-2", qty: 1000, tax: 60000, cat: "耐高温材料", base: 70, freight: 0.5, interim: 0 }),
+  // C: 修正=100-1=99 > 基价95 → 基数封顶=95000 → 提成=684；溢价=(99-95)×1000×0.15=600（溢价口径不受影响）
+  mkSyn({ order: "TEST-C", cust: "C-TEST", mat: "M-3", qty: 1000, tax: 100000, cat: "耐高温材料", base: 95, freight: 0, interim: 1 }),
+];
+const synResult = runCalculation({ settlements: synthetic, priceMap: new Map(), persons: [{ name: "测试员", defaultBaseSalary: 2000, defaultPerfBase: 2000, perfScore: 0.5, level: "一级" }], personSettings: {}, tradeMarginInputs: {}, activityOverrides: {}, bonusInputs: {}, adjustmentInputs: {} });
+const synLine = (o) => synResult.validRegular.find((l) => l.销售订单 === o);
+const synExpect = (label, got, want) => console.log(`${label}: 引擎=${got.toFixed(2)} 期望=${want} → ${Math.abs(got - want) < 0.01 ? "✅" : "❌"}`);
+synExpect("TEST-A 修正单价", synLine("TEST-A")._adjPrice, 58.5);
+synExpect("TEST-A 销售提成(居间1扣基数)", synLine("TEST-A")._saleCommission, 421.2);
+synExpect("TEST-B 销售提成(居间0不扣)", synLine("TEST-B")._saleCommission, 428.4);
+synExpect("TEST-C 销售提成(基数封顶)", synLine("TEST-C")._saleCommission, 684);
+synExpect("TEST-C 溢价提成(口径不变)", synLine("TEST-C")._premiumCommission, 600);
+if (synResult.warnings.length) { console.log("合成数据预警:", synResult.warnings.map((w) => w.msg).join("；")); }
